@@ -5,7 +5,7 @@
 
 namespace Ramulator {
 namespace TierRuntime {
-
+// KV Block 하나가 의미상 몇 바이트의 K/V 데이터를 포함하는가?
 struct KVBlockShapeConfig {
   std::uint64_t tokens_per_block = 0;
   std::uint64_t layers_on_hbm = 0;

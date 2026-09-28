@@ -1,4 +1,4 @@
-#include "tier_runtime/kv_block_shape.h"
+#include "kv_block_shape.h"
 
 #include <limits>
 #include <stdexcept>
