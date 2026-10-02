@@ -1,0 +1,17 @@
+# workload params.
+
+num_requests: 256
+seed: 0
+
+rate_rps: 2.0
+
+# sigma가 꼬리 길이(long tail)
+prompt_mean: 8192
+prompt_sigma: 0.8
+
+# actual_output_tokens 용 임시값
+output_mean: 2048
+output_sigma: 0.8
+
+pred_bias: 0.0
+pred_sigma: 0.3
