@@ -1,0 +1,8 @@
+# TODO: hugging face 모델 config 참고해서 수정
+
+num_layers: 32
+num_kv_heads: 8
+head_dim: 128
+element_bytes: 2        # FP16
+
+max_output_tokens: 8192

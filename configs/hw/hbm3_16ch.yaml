@@ -1,0 +1,11 @@
+# hw config file
+total_channels: 16
+
+pseudochannels_per_channel: 2
+ranks_per_pseudochannel: 2
+bank_groups_per_rank: 4
+banks_per_bank_group: 4
+
+rows_per_bank: 16384
+columns_per_row: 32
+bytes_per_column: 32

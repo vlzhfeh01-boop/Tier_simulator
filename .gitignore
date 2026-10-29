@@ -1,3 +1,5 @@
 /build/
 /kv_capacity_model_test
-
+experiments/
+tier_workload/__pycache__
+__pycache__
