@@ -4,7 +4,7 @@ index 2c9d406..741b3c9 100644
 +++ b/src/base/request.h
 @@ -19,0 +20 @@ struct Request {
 +      // DRAM requests
-@@ -21 +22,13 @@ struct Request {
+@@ -21 +22,14 @@ struct Request {
 -      Write,
 +      Write = 1,
 +
@@ -18,4 +18,5 @@ index 2c9d406..741b3c9 100644
 +      PIM_SFM = 10,
 +      PIM_SET_MODEL = 11,
 +      PIM_SET_HEAD = 12,
-+      PIM_BARRIER = 13
++      PIM_BARRIER = 13,
++      StoreFence = 14

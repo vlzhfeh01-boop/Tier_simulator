@@ -1,3 +1,7 @@
+#include <algorithm>
+#include <limits>
+#include <stdexcept>
+
 #include "dram_controller/controller.h"
 #include "memory_system/memory_system.h"
 
@@ -28,6 +32,11 @@ class HBM3PIMController final : public IDRAMController, public Implementation {
 
     bool is_pim = false;
 
+    // Software ordering state for this channel, not a DRAM command.
+    bool m_store_fence_pending = false;
+    Clk_t m_latest_write_safe_cycle = 0;
+    Clk_t m_store_guard_cycles = 0;
+
   public:
     void init() override {
       m_wr_low_watermark =  param<float>("wr_low_watermark").desc("Threshold for switching back to read mode.").default_val(0.2f);
@@ -48,9 +57,32 @@ class HBM3PIMController final : public IDRAMController, public Implementation {
       m_dram = memory_system->get_ifce<IDRAM>();
       m_row_addr_idx = m_dram->m_levels("row");
       m_priority_buffer.max_size = 512*3 + 32;
+
+      const int nCWL = m_dram->m_timing_vals("nCWL");
+      const int nBL = m_dram->m_timing_vals("nBL");
+      const int nWR = m_dram->m_timing_vals("nWR");
+      const int nWTRS = m_dram->m_timing_vals("nWTRS");
+      const int nWTRL = m_dram->m_timing_vals("nWTRL");
+      if (nCWL < 0 || nBL <= 0 || nWR < 0 || nWTRS < 0 || nWTRL < 0) {
+        throw std::invalid_argument("store fence requires valid write recovery timings");
+      }
+
+      // Conservative boundary covering write recovery and write-to-read delay
+      m_store_guard_cycles = static_cast<Clk_t>(nCWL) + nBL + std::max({nWR,nWTRS,nWTRL});
+      register_stat(m_store_guard_cycles).name("store_fence_guard_cycles_ch{}",m_channel_id);
     };
 
     bool send(Request& req) override {
+      // Reject later requests until this channel's earlier work is safe.
+      if(m_store_fence_pending) {
+        return false;
+      }
+      if(req.type_id == Request::Type::StoreFence) {
+        req.arrive = m_clk;
+        m_store_fence_pending = has_bufferd_requests() || m_clk < m_latest_write_safe_cycle;
+        return true; // DRAM command로 변환하기 전에 처리.
+      }
+
       req.final_command = m_dram->m_request_translations(req.type_id);
 
       // Forward existing write requests to incoming read requests
@@ -121,65 +153,68 @@ class HBM3PIMController final : public IDRAMController, public Implementation {
       }
 
       // 4. Finally, issue the commands to serve the request
+      int first_command = -1;
       if (request_found) {
-        // If we find a real request to serve
-        m_dram->issue_command(req_it->command, req_it->addr_vec);
-
-        // If we are issuing the last command, set depart clock cycle and move the request to the pending queue
-        if (req_it->command == req_it->final_command) {
-          if (req_it->type_id == Request::Type::Read) {
-            req_it->depart = m_clk + m_dram->m_read_latency;
-            pending.push_back(*req_it);
-          } else if (req_it->type_id == Request::Type::Write) {
-            // TODO: Add code to update statistics
-          }
-          buffer->remove(req_it);
-        } else {
-          if (!is_pim) {
-            if (m_dram->m_command_meta(req_it->command).is_opening) {
-              m_active_buffer.enqueue(*req_it);
-              buffer->remove(req_it);
-            }
-          }
-        }
+        first_command = req_it->command;
+        issue_selected(req_it,*buffer);
       }
 
       // 5. If next command is ROW/COL command while issued command is COL/ROW command, issue next command concurrently
       ReqBuffer::iterator sec_req_it;
       ReqBuffer* sec_buffer = nullptr;
       bool sec_request_found = false;
-      sec_request_found = schedule_sec_request(sec_req_it, buffer, req_it->command);
+      if (request_found) {
+        sec_request_found =
+            schedule_sec_request(sec_req_it, sec_buffer, first_command);
+      }
       for (auto plugin : m_plugins) {
         plugin->update(sec_request_found, sec_req_it);
       }
       if (sec_request_found) {
-        m_dram->issue_command(sec_req_it->command, sec_req_it->addr_vec);
-
-        if (sec_req_it->command == sec_req_it->final_command) {
-          if (sec_req_it->type_id == Request::Type::Read) {
-            sec_req_it->depart = m_clk + m_dram->m_read_latency;
-            pending.push_back(*sec_req_it);
-          } else if (sec_req_it->type_id == Request::Type::Write) {
-          }
-          buffer->remove(sec_req_it);
-        } else {
-          if (!is_pim) {
-            if (m_dram->m_command_meta(sec_req_it->command).is_opening) {
-              m_active_buffer.enqueue(*sec_req_it);
-              buffer->remove(sec_req_it);
-            }
-          }
-        }
+        issue_selected(sec_req_it, *sec_buffer);
+      }
+      // 다음 frontend 재시도 부터 요청을 받는다.
+      if(m_store_fence_pending && !has_bufferd_requests() && m_clk >= m_latest_write_safe_cycle) {
+        m_store_fence_pending = false;
       }
     };
 
 
     bool is_pending() override {
-      bool is_pending = m_active_buffer.size() ||  m_priority_buffer.size() || m_read_buffer.size() || m_write_buffer.size() || m_pim_buffer.size() || pending.size();
-      return is_pending;
+      return m_store_fence_pending || has_bufferd_requests();
     };
 
   private:
+    bool has_bufferd_requests() const {
+      return m_active_buffer.size() || m_priority_buffer.size() ||
+        m_read_buffer.size() || m_write_buffer.size() ||
+        m_pim_buffer.size() || pending.size();
+    }
+
+    void issue_selected(ReqBuffer::iterator req_it, ReqBuffer& buffer) {
+      m_dram->issue_command(req_it->command, req_it->addr_vec);
+      if(req_it->command == req_it->final_command) {
+        if(req_it->type_id == Request::Type::Read) {
+          req_it->depart = m_clk + m_dram->m_read_latency;
+          pending.push_back(*req_it);
+        }
+        else if (req_it->type_id == Request::Type::Write) {
+          if (m_clk > std::numeric_limits<Clk_t>::max() - m_store_guard_cycles) {
+            throw std::overflow_error("store fence cycle overflow");
+          }
+          m_latest_write_safe_cycle = std::max(
+              m_latest_write_safe_cycle, m_clk + m_store_guard_cycles
+          );
+        }
+        buffer.remove(req_it);
+      } else if(!is_pim && m_dram->m_command_meta(req_it->command).is_opening && 
+                &buffer != &m_active_buffer) {
+          if(m_active_buffer.enqueue(*req_it)) {
+            buffer.remove(req_it);
+          }
+      }
+    }
+
     /**
      * @brief    Helper function to serve the completed read requests
      * @details
@@ -231,6 +266,7 @@ class HBM3PIMController final : public IDRAMController, public Implementation {
      * 
      */
     bool schedule_request(ReqBuffer::iterator& req_it, ReqBuffer*& req_buffer) {
+      is_pim = false;
       bool request_found = false;
       // 2.1    First, check the act buffer to serve requests that are already activating (avoid useless ACTs)
       if (req_it= m_scheduler->get_best_request(m_active_buffer); req_it != m_active_buffer.end()) {
@@ -305,6 +341,7 @@ class HBM3PIMController final : public IDRAMController, public Implementation {
      * 
      */
     bool schedule_sec_request(ReqBuffer::iterator& req_it, ReqBuffer*& req_buffer, int first_command) {
+      is_pim = false;
       bool request_found = false;
       // 5.1    First, check the act buffer to serve requests that are already activating (avoid useless ACTs)
       if (req_it= m_scheduler->get_best_request(m_active_buffer); req_it != m_active_buffer.end()) {

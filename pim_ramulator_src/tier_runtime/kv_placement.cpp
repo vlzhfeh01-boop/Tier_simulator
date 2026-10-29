@@ -1,4 +1,4 @@
-#include "tier_runtime/kv_placement.h"
+#include "kv_placement.h"
 
 #include <limits>
 #include <stdexcept>

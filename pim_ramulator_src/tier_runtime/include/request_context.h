@@ -1,6 +1,7 @@
 /* 
 Request Context : 여러 토큰과 수많음 PIM 명령을 포함하는 하나의 LLM 요청
 이 요청이 어떤 채널을 사용하는지 기록
+요청 조건, 실행 상태, 채널 목록, 진행 상황과 시각.
 */
 #ifndef RAMULATOR_TIER_RUNTIME_REQUEST_CONTEXT_H
 #define RAMULATOR_TIER_RUNTIME_REQUEST_CONTEXT_H
@@ -40,6 +41,7 @@ namespace TierRuntime{
 
         std::uint32_t generated_tokens = 0;
         std::vector<int> allocated_channels {};
+        std::uint64_t initial_channel_count = 0; // admission 시 고정; 성장 채널을 뒤에 추가한다.
 
         Clk_t admitted_cycle = -1;
         Clk_t first_token_cycle = -1;

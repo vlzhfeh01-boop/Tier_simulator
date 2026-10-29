@@ -1,3 +1,10 @@
+/* 
+    블록 내부의 bank 분할과 row-column 위치
+
+    Block : 일정 수의 토큰에 대한 전체 layer, head의 K/V 묶음.
+    Slice : 특정 (K/V, layer, head)의 연속된 row 영역.
+    Tile : 한 slice에서 block 하나가 차지하는 데이터 영역.
+*/
 #pragma once
 
 #include <cstdint>
@@ -79,7 +86,7 @@ namespace Ramulator::TierRuntime {
             std::uint64_t slice_base_row(KVKind kind, std::uint64_t layer_index, std::uint64_t kv_head_index) const;
 
             RowColumnLocation locate_mac(KVKind kind, std::uint64_t layer_index, std::uint64_t kv_head_index, 
-                std::uint64_t channel_tile_index,
+                std::uint64_t channel_block_index,
                 std::uint64_t dimension_step) const;
             
             std::uint64_t required_rows_per_slice(std::uint64_t local_tile_count) const;
@@ -104,11 +111,11 @@ namespace Ramulator::TierRuntime {
             std::uint64_t m_dimension_partition_count = 0;
             std::uint64_t m_physical_bank_count = 0;
 
-            std::uint64_t m_tokens_per_tile = 0;
+            std::uint64_t m_tokens_per_block = 0;
             std::uint64_t m_elements_per_column = 0;
             std::uint64_t m_dimensions_per_bank = 0;
 
-            std::uint64_t m_columns_per_tile = 0;
+            std::uint64_t m_columns_per_block = 0;
             std::uint64_t blocks_per_row_in_slice = 0;
             std::uint64_t m_tokens_per_row = 0;
 
@@ -116,7 +123,7 @@ namespace Ramulator::TierRuntime {
             std::uint64_t m_rows_per_slice_capacity = 0;
             std::uint64_t m_unused_rows_per_bank = 0;
 
-            std::uint64_t m_max_tiles_per_channel = 0;
+            std::uint64_t m_max_blocks_per_channel = 0;
             std::uint64_t m_max_tokens_per_channel = 0;
 
             std::uint64_t m_row_bytes_per_bank = 0;

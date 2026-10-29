@@ -1,3 +1,5 @@
+// 현재 토큰을 저장하려면 채널이 몇 개 필요한가?
+// 토큰 수 -> 블록 수 -> 필요한 채널 수, growth 필요 여부
 #pragma once
 
 #include <cstdint>

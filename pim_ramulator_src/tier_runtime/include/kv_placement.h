@@ -1,3 +1,6 @@
+/* 
+    블록별 배치 결과 기록과 토큰 위치 조회.
+*/
 #ifndef RAMULATOR_TIER_RUNTIME_KV_PLACEMENT_H
 #define RAMULATOR_TIER_RUNTIME_KV_PLACEMENT_H
 

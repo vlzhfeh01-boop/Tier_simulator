@@ -28,6 +28,7 @@ class PIMDRAMSystem final : public IMemorySystem, public Implementation {
     int s_num_pim_set_model_requests = 0;
     int s_num_pim_set_head_requests = 0;
     int s_num_other_requests = 0;
+    int s_num_store_fence_requests = 0;
 
 
   public:
@@ -61,6 +62,7 @@ class PIMDRAMSystem final : public IMemorySystem, public Implementation {
       register_stat(s_num_pim_set_model_requests).name("total_num_pim_set_model_requests");
       register_stat(s_num_pim_set_head_requests).name("total_num_pim_set_head_requests");
       register_stat(s_num_other_requests).name("total_num_other_requests");
+      register_stat(s_num_store_fence_requests).name("total_num_store_fence_requests");
     };
 
     void setup(IFrontEnd* frontend, IMemorySystem* memory_system) override { }
@@ -117,6 +119,10 @@ class PIMDRAMSystem final : public IMemorySystem, public Implementation {
             break;
           }
           case Request::Type::PIM_BARRIER: {
+            break;
+          }
+          case Request::Type::StoreFence: {
+            s_num_store_fence_requests++;
             break;
           }
           default: {

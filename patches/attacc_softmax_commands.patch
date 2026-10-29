@@ -1,0 +1,258 @@
+--- a/pim_ramulator_src/tier_runtime/include/pim_command.h
++++ b/pim_ramulator_src/tier_runtime/include/pim_command.h
+@@ -11,11 +11,13 @@
+         MoveSoftmaxBuffer,
+         Barrier,
+         MemoryWrite,
+-        StoreFence
++        StoreFence,
++        Softmax,
++        MoveGemvBuffer
+     };
+ 
+     struct PIMCommand {
+         PIMOpcode opcode;
+         std::uint64_t address;
+     };
+-} // namespace Ramulator::TierRuntime
+\ No newline at end of file
++} // namespace Ramulator::TierRuntime
+--- a/pim_ramulator_src/tier_runtime/attacc_trace_writer.cpp
++++ b/pim_ramulator_src/tier_runtime/attacc_trace_writer.cpp
+@@ -17,6 +17,8 @@
+                 case PIMOpcode::Barrier: return "PIM_BARRIER";
+                 case PIMOpcode::MemoryWrite: return "ST";
+                 case PIMOpcode::StoreFence: return "ST_FENCE";
++                case PIMOpcode::Softmax: return "PIM_SFM";
++                case PIMOpcode::MoveGemvBuffer: return "PIM_MV_GB";
+             }
+             throw std::invalid_argument("unsupported PIM opcode");
+         }
+@@ -67,4 +69,4 @@
+             throw std::runtime_error("failed to close trace file: " + path.string());
+         }
+     }
+-}    // namespace Ramulator::TierRuntime
+\ No newline at end of file
++}    // namespace Ramulator::TierRuntime
+--- a/pim_ramulator_src/tier_runtime/include/pim_command_generator.h
++++ b/pim_ramulator_src/tier_runtime/include/pim_command_generator.h
+@@ -63,6 +63,11 @@
+     [[nodiscard]]
+     QKCommandBatch generate_qk(const QKCommandInput& input) const;
+ 
++    // qk_batch must be an unmodified result from this generator's generate_qk().
++    // One channel-scoped AttAcc command per active channel; no latency model.
++    [[nodiscard]]
++    std::vector<PIMCommand> generate_softmax(const QKCommandBatch& qk_batch) const;
++
+     // Generates addresses only. Does not allocate channels, modify valid
+     // length, model payload values, or wait for stores to complete.
+     [[nodiscard]]
+--- a/pim_ramulator_src/tier_runtime/pim_command_generator.cpp
++++ b/pim_ramulator_src/tier_runtime/pim_command_generator.cpp
+@@ -249,4 +249,17 @@
+     return batch;
+ }
+ 
++std::vector<PIMCommand> PIMCommandGenerator::generate_softmax(
++    const QKCommandBatch& qk_batch
++) const {
++    std::vector<PIMCommand> commands;
++    commands.reserve(qk_batch.active_channel_ids.size());
++    for (const int channel_id : qk_batch.active_channel_ids) {
++        commands.push_back(PIMCommand{
++            PIMOpcode::Softmax, encode_channel(channel_id)
++        });
++    }
++    return commands;
++}
++
+ }  // namespace Ramulator::TierRuntime
+--- /dev/null
++++ b/pim_ramulator_src/tier_runtime/examples/qk_softmax_example.cpp
+@@ -0,0 +1,31 @@
++#include <exception>
++#include <iostream>
++
++#include "attacc_trace_writer.h"
++#include "pim_command_generator.h"
++
++int main(int argc, char** argv) {
++    using namespace Ramulator::TierRuntime;
++    try {
++        const KVBlockShape shape({16, 2, 2, 128, 2});
++        const RowAlignedKVLayout layout(shape, {2, 2, 4, 4, 16384, 32, 32});
++        const KVCapacityModel capacity(layout);
++        const OrderedBlockMapper mapper(capacity);
++        const PIMCommandGenerator generator(layout, mapper, 16);
++
++        const auto qk = generator.generate_qk({0, 0, 33, {2, 5}, 2});
++        const auto softmax = generator.generate_softmax(qk);
++
++        auto commands = qk.commands;
++        commands.insert(commands.end(), softmax.begin(), softmax.end());
++
++        const auto path = argc > 1 ? argv[1] : "qk_softmax_33_tokens.trace";
++        AttAccTraceWriter::write_file(path, commands);
++        std::cout << qk.commands.size() << " QK requests + "
++                  << softmax.size() << " PIM_SFM requests = "
++                  << commands.size() << " trace entries -> " << path << '\n';
++    } catch (const std::exception& error) {
++        std::cerr << error.what() << '\n';
++        return 1;
++    }
++}
+--- /dev/null
++++ b/tests/softmax_commands_test.cpp
+@@ -0,0 +1,101 @@
++#include <cstdint>
++#include <iostream>
++#include <sstream>
++#include <stdexcept>
++#include <vector>
++
++#include "attacc_trace_writer.h"
++#include "pim_command_generator.h"
++
++using namespace Ramulator::TierRuntime;
++
++namespace {
++
++void require(bool condition, const char* message) {
++    if (!condition) {
++        throw std::runtime_error(message);
++    }
++}
++
++void verify_softmax(
++    const PIMCommandGenerator& generator,
++    const QKCommandBatch& qk,
++    const AttAccAddressEncoder& encoder,
++    const std::vector<int>& expected_channels
++) {
++    const auto commands = generator.generate_softmax(qk);
++    require(commands.size() == expected_channels.size(), "active channel count");
++    for (std::size_t i = 0; i < commands.size(); ++i) {
++        require(commands[i].opcode == PIMOpcode::Softmax, "SFM opcode");
++        const auto address = encoder.decode(commands[i].address);
++        require(address.channel_id == expected_channels[i], "channel order");
++        require(address.pseudochannel == 0 && address.rank == 0
++                && address.bank_group == 0 && address.bank == 0
++                && address.row == 0 && address.column == 0
++                && address.byte_offset_in_column == 0,
++                "canonical channel-scoped SFM address");
++    }
++}
++
++} // namespace
++
++int main() {
++    static_assert(static_cast<unsigned>(PIMOpcode::WriteGemvBuffer) == 0);
++    static_assert(static_cast<unsigned>(PIMOpcode::StoreFence) == 5);
++    static_assert(static_cast<unsigned>(PIMOpcode::Softmax) == 6);
++    static_assert(static_cast<unsigned>(PIMOpcode::MoveGemvBuffer) == 7);
++
++    const KVBlockShape shape({16, 2, 2, 128, 2});
++    const RowAlignedKVLayout layout(shape, {2, 2, 4, 4, 16384, 32, 32});
++    const KVCapacityModel capacity(layout);
++    const OrderedBlockMapper mapper(capacity);
++    const PIMCommandGenerator generator(layout, mapper, 16);
++    const AttAccAddressEncoder encoder(layout, 16);
++
++    const auto qk = generator.generate_qk({0, 0, 33, {2, 5}, 2});
++    require(qk.commands.size() == 44, "existing QK request count");
++    verify_softmax(generator, qk, encoder, {2, 5});
++    const auto softmax = generator.generate_softmax(qk);
++    require(softmax[0].address == 0x80000000ULL
++            && softmax[1].address == 0x140000000ULL, "fixture addresses");
++
++    std::ostringstream suffix;
++    AttAccTraceWriter::write(suffix, softmax);
++    require(suffix.str() == "PIM_SFM 0x80000000\nPIM_SFM 0x140000000\n",
++            "exact AttAcc SFM spelling and addresses");
++    std::ostringstream transfers;
++    AttAccTraceWriter::write(transfers, {
++        {PIMOpcode::MoveSoftmaxBuffer, 0x80000000ULL},
++        {PIMOpcode::MoveGemvBuffer, 0x80000000ULL},
++        {PIMOpcode::MemoryWrite, 0x80000000ULL},
++        {PIMOpcode::StoreFence, 0x80000000ULL}
++    });
++    require(transfers.str() == "PIM_MV_SB 0x80000000\nPIM_MV_GB 0x80000000\n"
++            "ST 0x80000000\nST_FENCE 0x80000000\n", "new and existing writer operations");
++
++    verify_softmax(generator, generator.generate_qk({0, 0, 1, {2, 5}, 2}), encoder, {2});
++    verify_softmax(generator, generator.generate_qk({0, 0, 0, {2, 5}, 2}), encoder, {});
++    verify_softmax(generator, generator.generate_qk({0, 0, 33, {5, 2}, 2}), encoder, {5, 2});
++    verify_softmax(generator, generator.generate_qk({0, 0, 33, {2, 5, 9}, 2}), encoder, {2, 5});
++    verify_softmax(generator, generator.generate_qk({1, 1, 34, {2, 5}, 2}), encoder, {2, 5});
++
++    const RowAlignedKVLayout small_layout(shape, {2, 2, 4, 4, 8, 32, 32});
++    const KVCapacityModel small_capacity(small_layout);
++    const OrderedBlockMapper small_mapper(small_capacity);
++    const PIMCommandGenerator small_generator(small_layout, small_mapper, 16);
++    const AttAccAddressEncoder small_encoder(small_layout, 16);
++    // Two original channels hold 512 tokens; token 513 uses growth channel 9.
++    verify_softmax(small_generator,
++        small_generator.generate_qk({0, 0, 513, {2, 5, 9}, 2}),
++        small_encoder, {2, 5, 9});
++
++    const auto append = generator.generate_kv_append({0, 0, 33, {2, 5}, 2});
++    require(append.commands.size() == 16 && append.key_write_count == 8
++            && append.value_write_count == 8 && append.channel_id == 2,
++            "KV append regression");
++
++    auto combined = qk.commands;
++    combined.insert(combined.end(), softmax.begin(), softmax.end());
++    require(combined.size() == 46 && qk.commands.size() == 44, "append without mutation");
++    std::cout << "PASS: SFM channels/addresses, writer, growth activation, QK and KV append regression\n";
++}
+--- /dev/null
++++ b/ramulator2/trace_gen/tier/qk_softmax_33_tokens.trace
+@@ -0,0 +1,46 @@
++PIM_WR_GB 0x80000000
++PIM_WR_GB 0x140000000
++PIM_WR_GB 0x80000001
++PIM_WR_GB 0x140000001
++PIM_WR_GB 0x81000000
++PIM_WR_GB 0x141000000
++PIM_WR_GB 0x81000001
++PIM_WR_GB 0x141000001
++PIM_WR_GB 0x82000000
++PIM_WR_GB 0x142000000
++PIM_WR_GB 0x82000001
++PIM_WR_GB 0x142000001
++PIM_WR_GB 0x83000000
++PIM_WR_GB 0x143000000
++PIM_WR_GB 0x83000001
++PIM_WR_GB 0x143000001
++PIM_BARRIER 0x80000000
++PIM_BARRIER 0x140000000
++PIM_MAC_AB 0x80000000
++PIM_MAC_AB 0x140000000
++PIM_MAC_AB 0x80000020
++PIM_MAC_AB 0x140000020
++PIM_MAC_AB 0x80000040
++PIM_MAC_AB 0x80000060
++PIM_BARRIER 0x80000000
++PIM_BARRIER 0x140000000
++PIM_MV_SB 0x80000000
++PIM_MV_SB 0x140000000
++PIM_MV_SB 0x90000000
++PIM_MV_SB 0x150000000
++PIM_MV_SB 0x84000000
++PIM_MV_SB 0x144000000
++PIM_MV_SB 0x94000000
++PIM_MV_SB 0x154000000
++PIM_MV_SB 0x88000000
++PIM_MV_SB 0x148000000
++PIM_MV_SB 0x98000000
++PIM_MV_SB 0x158000000
++PIM_MV_SB 0x8c000000
++PIM_MV_SB 0x14c000000
++PIM_MV_SB 0x9c000000
++PIM_MV_SB 0x15c000000
++PIM_BARRIER 0x80000000
++PIM_BARRIER 0x140000000
++PIM_SFM 0x80000000
++PIM_SFM 0x140000000

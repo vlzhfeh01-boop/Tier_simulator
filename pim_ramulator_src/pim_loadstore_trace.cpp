@@ -59,6 +59,7 @@ class PIMLoadStoreTrace : public IFrontEnd, public Implementation {
           case 11: request_sent = m_memory_system->send({t.addr, Request::Type::PIM_SET_MODEL}); break;
           case 12: request_sent = m_memory_system->send({t.addr, Request::Type::PIM_SET_HEAD}); break;
           case 13: request_sent = m_memory_system->send({t.addr, Request::Type::PIM_BARRIER}); break;
+          case 14: request_sent = m_memory_system->send({t.addr, Request::Type::StoreFence}); break;
           default:;
         }
         if (request_sent) {
@@ -119,6 +120,8 @@ class PIMLoadStoreTrace : public IFrontEnd, public Implementation {
           req_type = 12;
         } else if (tokens[0] == "PIM_BARRIER") {
           req_type = 13;
+        } else if (tokens[0] == "ST_FENCE") {
+          req_type = 14;
         } else {
           throw ConfigurationError("Trace {} format invalid!", file_path_str);
         }

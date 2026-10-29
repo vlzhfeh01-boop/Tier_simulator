@@ -122,7 +122,7 @@ namespace TierRuntime{
             const std::uint64_t current_block_capacity = block_capacity(allocated_channel_count);
             // 현재 마지막 block까지 모두 사용하고 있다. 를 의미.
             return current_block_count == current_block_capacity;
-        }
+    }
     
 
     std::uint64_t KVCapacityModel::checked_add(

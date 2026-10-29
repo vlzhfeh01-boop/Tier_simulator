@@ -41,9 +41,9 @@ namespace Ramulator::TierRuntime {
             m_token_partition_count,m_dimension_partition_count
         );
 
-        m_tokens_per_tile = m_token_partition_count; 
+        m_tokens_per_block = m_token_partition_count; 
 
-        if (m_shape.tokens_per_block() != m_tokens_per_tile) {
+        if (m_shape.tokens_per_block() != m_tokens_per_block) {
             throw std::invalid_argument(
                 "KVBlockShape::tokens_per_block must match "
                 "the PIM token partition count.");
@@ -53,20 +53,20 @@ namespace Ramulator::TierRuntime {
 
         m_dimensions_per_bank = ceil_div(m_shape.head_dimension(),m_dimension_partition_count);
 
-        m_columns_per_tile = ceil_div(m_dimensions_per_bank , m_elements_per_column);
+        m_columns_per_block = ceil_div(m_dimensions_per_bank , m_elements_per_column);
 
-        if (m_columns_per_tile > m_geometry.columns_per_row) {
+        if (m_columns_per_block > m_geometry.columns_per_row) {
             throw std::invalid_argument(
                 "A token tile does not fit in one row.");
         }
 
-        blocks_per_row_in_slice = m_geometry.columns_per_row / m_columns_per_tile; // 하나의 row당 차지하는 tile수
+        blocks_per_row_in_slice = m_geometry.columns_per_row / m_columns_per_block; // 하나의 row당 차지하는 tile수
         if (blocks_per_row_in_slice == 0) {
             throw std::logic_error(
                 "tiles_per_row must be greater than zero.");
         }
 
-        m_tokens_per_row = checked_multiply(blocks_per_row_in_slice,m_tokens_per_tile);
+        m_tokens_per_row = checked_multiply(blocks_per_row_in_slice,m_tokens_per_block);
 
         m_slice_count = checked_multiply(2,m_shape.layer_head_count()); // K,V slice
 
@@ -79,9 +79,9 @@ namespace Ramulator::TierRuntime {
 
         m_unused_rows_per_bank = m_geometry.rows_per_bank % m_slice_count;
 
-        m_max_tiles_per_channel = checked_multiply(m_rows_per_slice_capacity,blocks_per_row_in_slice);
+        m_max_blocks_per_channel = checked_multiply(m_rows_per_slice_capacity,blocks_per_row_in_slice);
 
-        m_max_tokens_per_channel = checked_multiply(m_max_tiles_per_channel, m_tokens_per_tile);
+        m_max_tokens_per_channel = checked_multiply(m_max_blocks_per_channel, m_tokens_per_block);
 
         m_row_bytes_per_bank = checked_multiply(m_geometry.columns_per_row,m_geometry.bytes_per_column);
 
@@ -109,7 +109,7 @@ namespace Ramulator::TierRuntime {
 
 
     std::uint64_t   RowAlignedKVLayout::tokens_per_block() const noexcept {
-        return m_tokens_per_tile;
+        return m_tokens_per_block;
     }
 
 
@@ -124,7 +124,7 @@ namespace Ramulator::TierRuntime {
 
 
     std::uint64_t RowAlignedKVLayout::columns_per_block_in_slice() const noexcept {
-        return m_columns_per_tile;
+        return m_columns_per_block;
     }
 
 
@@ -154,7 +154,7 @@ namespace Ramulator::TierRuntime {
 
 
     std::uint64_t RowAlignedKVLayout::max_blocks_per_channel() const noexcept {
-        return m_max_tiles_per_channel;
+        return m_max_blocks_per_channel;
     }
 
 
@@ -169,7 +169,7 @@ namespace Ramulator::TierRuntime {
 
     TokenPartition RowAlignedKVLayout::locate_token_partition(
         std::uint64_t token_offset_in_tile) const {
-            if(token_offset_in_tile >= m_tokens_per_tile) {
+            if(token_offset_in_tile >= m_tokens_per_block) {
                 throw std::out_of_range(
                     "token_in_tile is outside the token tile."
                 );
@@ -265,14 +265,14 @@ namespace Ramulator::TierRuntime {
             std::uint64_t kv_head_index,
             std::uint64_t channel_block_index, // local tile index를 의미
             std::uint64_t dimension_step) const {
-                if(channel_block_index >= m_max_tiles_per_channel) {
+                if(channel_block_index >= m_max_blocks_per_channel) {
                     throw std::out_of_range(
                         "channel_tile_index exceeds channel capacity."
                     );
                 }
-                if(dimension_step >= m_columns_per_tile) {
+                if(dimension_step >= m_columns_per_block) {
                     throw std::out_of_range(
-                        "dimension_step exceeds columns_per_tile."
+                        "dimension_step exceeds columns_per_block."
                     );
                 }
 
@@ -280,7 +280,7 @@ namespace Ramulator::TierRuntime {
 
                 const std::uint64_t tile_slot_in_row = channel_block_index % blocks_per_row_in_slice;
 
-                const std::uint64_t first_column = tile_slot_in_row * m_columns_per_tile;
+                const std::uint64_t first_column = tile_slot_in_row * m_columns_per_block;
 
                 const std::uint64_t row = slice_base_row(kind,layer_index,kv_head_index) + row_offset_in_slice;
 
@@ -291,7 +291,7 @@ namespace Ramulator::TierRuntime {
             // slice 하나당 여러개의 연속된 row를 사용할 수 있다.
         std::uint64_t RowAlignedKVLayout::required_rows_per_slice(
             std::uint64_t local_tile_count) const  {
-                if(local_tile_count > m_max_tiles_per_channel) {
+                if(local_tile_count > m_max_blocks_per_channel) {
                     throw std::out_of_range(
                         "local_tile_count exceeds channel capacity."
                     );
