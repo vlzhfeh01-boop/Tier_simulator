@@ -9,7 +9,7 @@ int main() {
     const RowAlignedKVLayout layout(shape,{2,2,4,4,8,32,32});
     const KVCapacityModel capacity(layout);
     const OrderedBlockMapper mapper(capacity);
-    TierChannelRuntime runtime(capacity,mapper,3);
+    TierChannelRuntime runtime(capacity,mapper,3); // 물리 채널 3개.
     FirstFreeChannelPolicy policy;
     TierChannelScheduler scheduler(runtime,policy);
 
@@ -29,4 +29,18 @@ int main() {
 
     auto first = scheduler.try_begin_token(a);
     assert(first && first->token_index == 2047 && first->store_channel_id ==1);
+    runtime.complete_token(a,10); 
+
+    assert(!scheduler.try_begin_token(a)); //Needs +1, but no free channel.
+    auto b_token = scheduler.try_begin_token(b);
+    assert(b_token);
+    runtime.complete_token(b,12);
+    runtime.release_completed(b); // Channel 2 becomes free.
+
+    auto second = scheduler.try_begin_token(a);
+    assert(second && second->grew && second->store_channel_id==2);
+    std::cout << "request a: token " << second->token_index
+              << " automatically grew on channel " << second->store_channel_id << '\n';
+    runtime.complete_token(a, 20);
+    runtime.release_completed(a);
 }

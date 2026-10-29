@@ -17,7 +17,7 @@ namespace Ramulator::TierRuntime {
         std::vector<int> allocated_channel_ids;
         std::uint64_t initial_channel_count = 0;
         bool grew = false;
-    };
+    }; // 이 struct를 바탕으로 Trace Generator를 만든다.
 
     class TierChannelRuntime {
         public:

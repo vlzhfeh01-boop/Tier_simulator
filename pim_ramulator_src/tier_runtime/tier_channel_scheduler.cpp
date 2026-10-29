@@ -7,7 +7,7 @@
 
 namespace Ramulator::TierRuntime {
     std::vector<int> FirstFreeChannelPolicy::select_initial(
-        const RequestSpec& spec, std::uint64_t needed,
+        const RequestSpec& , std::uint64_t needed,
         const std::vector<int>& free_ids
     ) const {
         // 초기 할당 불가
@@ -23,7 +23,7 @@ namespace Ramulator::TierRuntime {
     }
 
     std::optional<int> FirstFreeChannelPolicy::select_growth(
-        const RequestContext& request, const std::vector<int>& free_ids
+        const RequestContext& , const std::vector<int>& free_ids
     ) const {
         if(free_ids.empty()) {
             return std::nullopt;
