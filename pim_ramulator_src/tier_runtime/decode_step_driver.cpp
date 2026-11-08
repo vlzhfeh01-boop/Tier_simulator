@@ -84,6 +84,81 @@ namespace Ramulator::TierRuntime {
     void DecodeStepDriver::submit_sv(const Send& send) {
         std::vector<Event> events;
         events.swap(*m_events);
-        
+        for (const auto& [index,issued_cycle] : events) {
+            if(index >= m_accepted || m_issued[index]) {
+                throw std::logic_error("invalid or duplicate SV issue callback");
+            }
+            m_issued[index] = true;
+            m_last_sv_issue = std::max(m_last_sv_issue.value_or(0),issued_cycle);
+        }
+        while (m_accepted < m_work->commands.size()) {
+            const auto index = m_accepted;
+            std::weak_ptr<std::vector<Event>> inbox = m_events;
+            IssueCallback callback = [inbox,index](std::uint64_t cycle) {
+                if(const auto events = inbox.lock()) {
+                    events->emplace_back(inbox,cycle);
+                }
+            };
+            if(!send(m_work->commands[index],std::move(callback))) {
+                break;
+            }
+            ++m_accepted;
+        }
+        if(m_accepted == m_issued.size()&& 
+            std::all_of(m_issued.begin(),m_issued.end(),
+                        [](bool issued){return issued;})) {
+            finish_phase(*m_last_sv_issue);
+        }
     }
+
+    void DecodeStepDriver::tick(std::uint64_t cycle, const Send& send) {
+        if(!send) {
+            throw std::invalid_argument("decode send function is missing");
+        }
+        if(done()) {
+            return ;
+        }
+        if(!m_work){
+            begin_phase();
+        }
+        switch(m_work->phase) {
+            case DecodePhase::KVAppendFence:
+                submit_kv(cycle,send);
+                break;
+            case DecodePhase::QK:
+                m_qk->tick(send);
+                if(m_qk->ready()) {
+                    m_last_qk_issue = m_qk->ready_cycle();
+                    finish_phase(*m_last_qk_issue);
+                }
+                break;
+            case DecodePhase::Softmax:
+                m_softmax->tick(cycle,send);
+                if(m_softmax->ready(cycle)) {
+                    finish_phase(m_softmax->sv_eligible_cycle());
+                }
+                break;
+            case DecodePhase::SV:
+                submit_sv(send);
+                break;
+            case DecodePhase::ContextMerge:
+                // No cross-channel reduction latency is modeled in this step.
+                finish_phase(m_last_sv_issue.value());
+                break;
+            case DecodePhase::Done:
+                throw std::logic_error("done phase cannot be submitted");
+        }
+    }
+
+    bool DecodeStepDriver::done() const noexcept {
+        return m_layer.done();
+    }
+
+    std::uint64_t DecodeStepDriver::last_sv_issue_cycle() const {
+        if(!done() || !m_last_sv_issue) {
+            throw std::logic_error("SV commands hav not all issued");
+        }
+        return *m_last_sv_issue;
+    }
+    
 } // namespace Ramulator::TierRuntime 

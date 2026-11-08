@@ -73,9 +73,16 @@ class PIM : public IScheduler, public Implementation {
       }
 
       auto candidate = buffer.begin();
-
-      if (candidate->type_id == Request::Type::PIM_BARRIER) {
+      // A barrier is a scheduler fence, not a DRAM command. Once it reaches
+      // the front, every preceding PIM request has issued. Report that event
+      // before removing the request so phase gates can account for it.
+      while (candidate->type_id == Request::Type::PIM_BARRIER) {
+        Request issued = *candidate;
+        issued.depart = cast_parent<IDRAMController>()->get_clk();
         buffer.remove(candidate);
+        if (issued.callback) {
+          issued.callback(issued);
+        }
         if (buffer.size() == 0) {
           return buffer.end();
         }
