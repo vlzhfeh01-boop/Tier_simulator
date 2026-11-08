@@ -65,9 +65,9 @@ namespace Ramulator::TierRuntime {
     };
 
     // Returns ONE phase at a tome and requires a completion event before the next.
-    class StageDecodeLayer {
+    class StagedDecodeLayer {
         public :
-            StageDecodeLayer(RuntimeDecodeLayerPlan plan,
+            StagedDecodeLayer(RuntimeDecodeLayerPlan plan,
                                 const PIMCommandGenerator& generator,
                                 const AttAccAddressEncoder& encoder);
             [[nodiscard]] std::optional<DecodePhaseWork> issue_next();

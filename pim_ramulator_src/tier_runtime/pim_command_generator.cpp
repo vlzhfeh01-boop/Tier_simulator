@@ -252,13 +252,12 @@ namespace Ramulator::TierRuntime{
     std::vector<PIMCommand> PIMCommandGenerator::generate_softmax(
         const QKCommandBatch& qk_batch
     ) const {
-        std::vector<PIMCommand> commands;
-        commands.reserve(qk_batch.active_channel_ids.size());
-        for (const int channel_id : qk_batch.active_channel_ids) {
-            commands.push_back(PIMCommand{
-                PIMOpcode::Softmax, encode_channel(channel_id)
-            });
+        if (qk_batch.active_channel_ids.empty()) {
+            throw std::invalid_argument("one query head needs an active QK channel");
         }
-        return commands;
+        // One buffer-die softmax per query head. The first active channel is
+        // only the routing address for Ramulator's channel-scoped request.
+        return {{PIMOpcode::Softmax,
+                 encode_channel(qk_batch.active_channel_ids.front())}};
     }
 }

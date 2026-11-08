@@ -71,7 +71,7 @@ namespace Ramulator::TierRuntime {
         return result;
     }
 
-    StageDecodeLayer::StageDecodeLayer(RuntimeDecodeLayerPlan plan,
+    StagedDecodeLayer::StagedDecodeLayer(RuntimeDecodeLayerPlan plan,
                                         const PIMCommandGenerator& generator,
                                         const AttAccAddressEncoder& encoder) 
         : m_plan(std::move(plan)), m_generator(generator), m_encoder(encoder) {
@@ -127,20 +127,9 @@ namespace Ramulator::TierRuntime {
             }
             work.commands = std::move(m_current_qk.commands);
         } else if(m_phase == DecodePhase::Softmax) {
-            if (m_current_qk.active_channel_ids.size() == 1) {
-                work.commands = m_generator.generate_softmax(m_current_qk);
-            } else {
-                // This address is a timing/routing proxy. The caller must have
-                // finished the preceding HBM-wide score gather before reaching
-                // this phase; the channel opcode itself does not perform it.
-                AttAccAddressCoordinates coordinates{};
-                coordinates.channel_id = m_current_qk.active_channel_ids.front();
-                work.commands.push_back(PIMCommand{
-                    PIMOpcode::Softmax, m_encoder.encode(coordinates)
-                });
-            }
+            work.commands = m_generator.generate_softmax(m_current_qk);
             if(work.commands.size() != 1 ||
-               work.commands.front().opcode != PIMOPcode::Softmax) {
+               work.commands.front().opcode != PIMOpcode::Softmax) {
                 throw std::logic_error("one query head requires one SFM command");
                }
         }  else if (m_phase == DecodePhase::SV) {
@@ -154,7 +143,7 @@ namespace Ramulator::TierRuntime {
             work.commands = std::move(sv.commands);
         } 
 
-        if (m_phase != DecodePhase::KvAppendFence) {
+        if (m_phase != DecodePhase::KVAppendFence) {
             work.active_channel_ids = m_current_qk.active_channel_ids;
             work.softmax_routing_channel_id = work.active_channel_ids.front();
             if (m_phase == DecodePhase::QK ||
@@ -181,7 +170,7 @@ namespace Ramulator::TierRuntime {
             throw std::logic_error("out-of-order decode phase completion");
         }
         switch (phase) {
-        case DecodePhase::KvAppendFence: m_phase = DecodePhase::QK; break;
+        case DecodePhase::KVAppendFence: m_phase = DecodePhase::QK; break;
         case DecodePhase::QK: m_phase = DecodePhase::Softmax; break;
         case DecodePhase::Softmax: m_phase = DecodePhase::SV; break;
         case DecodePhase::SV:

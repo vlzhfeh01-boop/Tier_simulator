@@ -67,7 +67,8 @@ namespace Ramulator::TierRuntime {
         QKCommandBatch generate_qk(const QKCommandInput& input) const;
 
         // qk_batch must be an unmodified result from this generator's generate_qk().
-        // One channel-scoped AttAcc command per active channel; no latency model yet.
+        // One head-wide SFM, routed through the first active channel's address.
+        // The caller enforces the all-channel QK boundary; no latency model here.
         [[nodiscard]]
         std::vector<PIMCommand> generate_softmax(const QKCommandBatch& qk_batch) const;
 
