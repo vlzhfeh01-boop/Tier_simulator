@@ -194,6 +194,11 @@ class HBM3PIMController final : public IDRAMController, public Implementation {
     void issue_selected(ReqBuffer::iterator req_it, ReqBuffer& buffer) {
       m_dram->issue_command(req_it->command, req_it->addr_vec);
       if(req_it->command == req_it->final_command) {
+        std::optional<Request> issued_pim;
+        if (&buffer == &m_pim_buffer && req_it->callback) {
+          req_it->depart = m_clk;
+          issued_pim = *req_it;
+        }
         if(req_it->type_id == Request::Type::Read) {
           req_it->depart = m_clk + m_dram->m_read_latency;
           pending.push_back(*req_it);
@@ -207,6 +212,9 @@ class HBM3PIMController final : public IDRAMController, public Implementation {
           );
         }
         buffer.remove(req_it);
+        if(issued_pim) {
+          issued_pim->callback(*issued_pim);
+        }
       } else if(!is_pim && m_dram->m_command_meta(req_it->command).is_opening && 
                 &buffer != &m_active_buffer) {
           if(m_active_buffer.enqueue(*req_it)) {
