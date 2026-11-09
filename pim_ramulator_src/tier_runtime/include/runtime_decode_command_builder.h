@@ -80,7 +80,7 @@ namespace Ramulator::TierRuntime {
             RuntimeDecodeLayerPlan m_plan;
             const PIMCommandGenerator& m_generator;
             const AttAccAddressEncoder& m_encoder;
-            DecodePhase m_phase = DecodePhase::KvAppendFence;
+            DecodePhase m_phase = DecodePhase::KVAppendFence;
             std::optional<DecodePhase> m_inflight;
             std::uint64_t m_query_head_index = 0;
             QKCommandBatch m_current_qk;

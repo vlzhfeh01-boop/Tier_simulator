@@ -64,7 +64,7 @@ int main() {
     for(std::uint64_t cycle = 1; cycle < 2000 && !driver.done(); ++cycle) {
         for(auto it = pending.begin(); it != pending.end();) {
             if(it->when <= cycle) {
-                it(it->opcode == PIMOpcode::Softmax) sfm_issue = it->when;
+                if(it->opcode == PIMOpcode::Softmax) sfm_issue = it->when;
                 it->callback(it->when); // 해당 명령이 이 타이밍에 발행됐다는 통지이다.
                 it = pending.erase(it);
             } else {

@@ -25,10 +25,11 @@ namespace Ramulator::TierRuntime {
         DecodeStepDriver(RuntimeDecodeLayerPlan plan,
                             const PIMCommandGenerator& generator,
                             const AttAccAddressEncoder& encoder, 
-                            std::uint64_t sodtmax_delay_cycles = 0,
+                            std::uint64_t softmax_delay_cycles = 0,
                             PhaseComplete on_phase_complete = {});
         
         void tick(std::uint64_t cycle, const Send& send);
+        [[nodiscard]] const DecodePhaseWork& pending_phase();
         [[nodiscard]] bool done() const noexcept;
         [[nodiscard]] std::uint64_t last_sv_issue_cycle() const;
     

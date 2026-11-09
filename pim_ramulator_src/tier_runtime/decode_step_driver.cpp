@@ -44,7 +44,7 @@ namespace Ramulator::TierRuntime {
             }
             m_issued.assign(m_work->commands.size(),false);
         } else if(m_work->phase == DecodePhase::ContextMerge && !m_work->commands.empty()){
-            throw std::logic_error("unexpected context merge commnads");
+            throw std::logic_error("unexpected context merge commands");
         }
     }
 
@@ -62,7 +62,7 @@ namespace Ramulator::TierRuntime {
 
     void DecodeStepDriver::submit_kv(std::uint64_t cycle, const Send& send) {
         const auto& commands = m_work->commands;
-        if(commads.empty() || commands.back().opcode != PIMOpcode::StoreFence) {
+        if(commands.empty() || commands.back().opcode != PIMOpcode::StoreFence) {
             throw std::logic_error("KV append must end in ST_FENCE");
         }
         while(m_accepted < commands.size()) {
@@ -96,7 +96,7 @@ namespace Ramulator::TierRuntime {
             std::weak_ptr<std::vector<Event>> inbox = m_events;
             IssueCallback callback = [inbox,index](std::uint64_t cycle) {
                 if(const auto events = inbox.lock()) {
-                    events->emplace_back(inbox,cycle);
+                    events->emplace_back(index,cycle);
                 }
             };
             if(!send(m_work->commands[index],std::move(callback))) {
@@ -118,9 +118,7 @@ namespace Ramulator::TierRuntime {
         if(done()) {
             return ;
         }
-        if(!m_work){
-            begin_phase();
-        }
+        (void)pending_phase();
         switch(m_work->phase) {
             case DecodePhase::KVAppendFence:
                 submit_kv(cycle,send);
@@ -150,9 +148,19 @@ namespace Ramulator::TierRuntime {
         }
     }
 
+    const DecodePhaseWork& DecodeStepDriver::pending_phase() {
+            if (done()) {
+                throw std::logic_error("completed decode layer has no pending phase");
+            }
+            if (!m_work) {
+                begin_phase();
+            }
+            return *m_work;
+    }
+
     bool DecodeStepDriver::done() const noexcept {
         return m_layer.done();
-    }
+    }    
 
     std::uint64_t DecodeStepDriver::last_sv_issue_cycle() const {
         if(!done() || !m_last_sv_issue) {
