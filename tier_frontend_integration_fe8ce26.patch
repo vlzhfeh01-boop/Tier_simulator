@@ -1,0 +1,487 @@
+diff --git a/pim_ramulator_src/patches/src_base_utils_include.patch b/pim_ramulator_src/patches/src_base_utils_include.patch
+new file mode 100644
+index 0000000..364909f
+--- /dev/null
++++ b/pim_ramulator_src/patches/src_base_utils_include.patch
+@@ -0,0 +1,5 @@
++diff --git a/src/base/utils.h b/src/base/utils.h
++--- a/src/base/utils.h
+++++ b/src/base/utils.h
++@@ -3,0 +4 @@
+++#include <cstdint>
+diff --git a/pim_ramulator_src/patches/src_frontend_tier_decode.patch b/pim_ramulator_src/patches/src_frontend_tier_decode.patch
+new file mode 100644
+index 0000000..70aa05e
+--- /dev/null
++++ b/pim_ramulator_src/patches/src_frontend_tier_decode.patch
+@@ -0,0 +1,31 @@
++diff --git a/src/frontend/CMakeLists.txt b/src/frontend/CMakeLists.txt
++--- a/src/frontend/CMakeLists.txt
+++++ b/src/frontend/CMakeLists.txt
++@@ -13,3 +13,27 @@ target_link_libraries(
++   PRIVATE
++   ramulator-frontend
++ )
+++
+++target_sources(ramulator-frontend PRIVATE
+++  impl/memory_trace/tier_decode_step_frontend.cpp
+++  ../tier_runtime/kv_block_shape.cpp
+++  ../tier_runtime/row_aligned_kv_layout.cpp
+++  ../tier_runtime/kv_capacity_model.cpp
+++  ../tier_runtime/ordered_block_mapper.cpp
+++  ../tier_runtime/kv_address_mapper.cpp
+++  ../tier_runtime/attacc_address_encoder.cpp
+++  ../tier_runtime/pim_command_generator.cpp
+++  ../tier_runtime/pim_command_generator_sv.cpp
+++  ../tier_runtime/tier_channel_runtime.cpp
+++  ../tier_runtime/tier_channel_scheduler.cpp
+++  ../tier_runtime/shared_channel_space.cpp
+++  ../tier_runtime/runtime_decode_command_builder.cpp
+++  ../tier_runtime/qk_issue_gate.cpp
+++  ../tier_runtime/qk_phase_submitter.cpp
+++  ../tier_runtime/softmax_phase_submitter.cpp
+++  ../tier_runtime/decode_step_driver.cpp
+++)
+++
+++target_include_directories(ramulator-frontend PRIVATE
+++  ${CMAKE_CURRENT_SOURCE_DIR}/../tier_runtime/include
+++)
+diff --git a/pim_ramulator_src/tier_decode_step.yaml b/pim_ramulator_src/tier_decode_step.yaml
+new file mode 100644
+index 0000000..d2bcac5
+--- /dev/null
++++ b/pim_ramulator_src/tier_decode_step.yaml
+@@ -0,0 +1,33 @@
++Frontend:
++  impl: TierDecodeStep
++  clock_ratio: 1
++  channel_a: 2
++  channel_b: 5
++  prompt_tokens: 33
++  softmax_delay_cycles: 0
++  Translation:
++    impl: NoTranslation
++    max_addr: 2147483648
++
++MemorySystem:
++  impl: PIMDRAM
++  clock_ratio: 1
++  DRAM:
++    impl: HBM3-PIM
++    org:
++      preset: HBM3_8Gb_2R
++      channel: 16
++    timing:
++      preset: HBM3_5.2Gbps
++  Controller:
++    impl: HBM3-PIM
++    Scheduler:
++      impl: PIM
++    RefreshManager:
++      impl: No
++    plugins:
++      - ControllerPlugin:
++          impl: HBM3TraceRecorder
++          path: ./log/tier_decode_step/cmd.log
++  AddrMapper:
++    impl: HBM3-PIM
+diff --git a/pim_ramulator_src/tier_decode_step_frontend.cpp b/pim_ramulator_src/tier_decode_step_frontend.cpp
+index 1793742..4e3d426 100644
+--- a/pim_ramulator_src/tier_decode_step_frontend.cpp
++++ b/pim_ramulator_src/tier_decode_step_frontend.cpp
+@@ -52,7 +52,7 @@ namespace Ramulator {
+     } // namespace
+ 
+     // All admitted Tier requests use the same command generator and phase driver.
+-    // Channel ownership is exclusive; shared-channel KV placement is not modeled.
++    // Exclusive Tier requests and shared-channel requests use the same phase driver.
+     class TierDecodeStepFrontend final : public IFrontEnd, public Implementation {
+         RAMULATOR_REGISTER_IMPLEMENTATION(
+             IFrontEnd, TierDecodeStepFrontend, "TierDecodeStep",
+@@ -198,7 +198,7 @@ namespace Ramulator {
+                     // 0부터 1씩 증가하면서 벡터를 채운다.
+                     std::iota(all_channels.begin(), all_channels.end(),0);
+                     item->shared_runtime->admit(request,std::move(all_channels),m_clk);
+-                    std::cout << "TIER_KV_REGION request_id = " << request.spec.request_id
++                    std::cout << "TIER_KV_REGION request_id=" << request.spec.request_id
+                               << " row_offset=" <<
+                                 m_shared_space->row_offset(request.spec.request_id) << '\n';
+                 // Tier 의 경우
+@@ -527,4 +527,4 @@ namespace Ramulator {
+                 });
+         }
+     };
+-} // namespace Ramulator
+\ No newline at end of file
++} // namespace Ramulator
+diff --git a/pim_ramulator_src/tier_decode_workload.csv b/pim_ramulator_src/tier_decode_workload.csv
+new file mode 100644
+index 0000000..38b4cad
+--- /dev/null
++++ b/pim_ramulator_src/tier_decode_workload.csv
+@@ -0,0 +1,4 @@
++# request_id,arrival_cycle,prompt_tokens,predicted_output_tokens,actual_output_tokens
++1,0,33,2,2
++2,0,33,1,1
++3,120,33,1,1
+diff --git a/pim_ramulator_src/tier_decode_workload.yaml b/pim_ramulator_src/tier_decode_workload.yaml
+new file mode 100644
+index 0000000..900e770
+--- /dev/null
++++ b/pim_ramulator_src/tier_decode_workload.yaml
+@@ -0,0 +1,35 @@
++Frontend:
++  impl: TierDecodeStep
++  clock_ratio: 1
++  workload_path: ./tier_decode_workload.csv
++  softmax_delay_cycles: 0
++  sv_drain_cycles: 4
++  context_merge_cycles: 2
++  non_pim_cycles: 10
++  max_cycles: 5000
++  Translation:
++    impl: NoTranslation
++    max_addr: 2147483648
++
++MemorySystem:
++  impl: PIMDRAM
++  clock_ratio: 1
++  DRAM:
++    impl: HBM3-PIM
++    org:
++      preset: HBM3_8Gb_2R
++      channel: 16
++    timing:
++      preset: HBM3_5.2Gbps
++  Controller:
++    impl: HBM3-PIM
++    Scheduler:
++      impl: PIM
++    RefreshManager:
++      impl: No
++    plugins:
++      - ControllerPlugin:
++          impl: HBM3TraceRecorder
++          path: ./log/tier_decode_workload/cmd.log
++  AddrMapper:
++    impl: HBM3-PIM
+diff --git a/pim_ramulator_src/tier_shared_workload.csv b/pim_ramulator_src/tier_shared_workload.csv
+new file mode 100644
+index 0000000..47ff863
+--- /dev/null
++++ b/pim_ramulator_src/tier_shared_workload.csv
+@@ -0,0 +1,3 @@
++# request_id,arrival_cycle,prompt_tokens,predicted_output_tokens,actual_output_tokens
++1,0,33,2,2
++2,0,33,1,1
+diff --git a/pim_ramulator_src/tier_shared_workload.yaml b/pim_ramulator_src/tier_shared_workload.yaml
+new file mode 100644
+index 0000000..2dd4710
+--- /dev/null
++++ b/pim_ramulator_src/tier_shared_workload.yaml
+@@ -0,0 +1,37 @@
++Frontend:
++  impl: TierDecodeStep
++  clock_ratio: 1
++  workload_path: ./tier_shared_workload.csv
++  shared_channels: true
++  shared_region_rows: 8
++  softmax_delay_cycles: 0
++  sv_drain_cycles: 4
++  context_merge_cycles: 2
++  non_pim_cycles: 10
++  max_cycles: 5000
++  Translation:
++    impl: NoTranslation
++    max_addr: 2147483648
++
++MemorySystem:
++  impl: PIMDRAM
++  clock_ratio: 1
++  DRAM:
++    impl: HBM3-PIM
++    org:
++      preset: HBM3_8Gb_2R
++      channel: 16
++    timing:
++      preset: HBM3_5.2Gbps
++  Controller:
++    impl: HBM3-PIM
++    Scheduler:
++      impl: PIM
++    RefreshManager:
++      impl: No
++    plugins:
++      - ControllerPlugin:
++          impl: HBM3TraceRecorder
++          path: ./log/tier_shared_workload/cmd.log
++  AddrMapper:
++    impl: HBM3-PIM
+diff --git a/pim_ramulator_src/verify_tier_decode_step.py b/pim_ramulator_src/verify_tier_decode_step.py
+new file mode 100644
+index 0000000..cc30540
+--- /dev/null
++++ b/pim_ramulator_src/verify_tier_decode_step.py
+@@ -0,0 +1,60 @@
++"""Check the one-head two-channel Ramulator integration log."""
++import re
++import sys
++from pathlib import Path
++
++if len(sys.argv) != 2:
++    raise SystemExit("usage: python3 verify_tier_decode_step.py RUN_OUTPUT")
++
++out = Path(sys.argv[1]).read_text()
++events = {}
++for phase, cycle in re.findall(
++    r"TIER_PHASE head=0 event=(\w+) cycle=(\d+)", out
++):
++    events[phase] = int(cycle)
++last = re.search(r"TIER_STEP last_sv_issue_cycle=(\d+)", out)
++required = ("KV_APPEND_FENCE", "QK_LAST_ISSUE",
++            "SFM_SV_ELIGIBLE", "SV_LAST_ISSUE")
++if not last or any(name not in events for name in required):
++    raise SystemExit("FAIL: missing frontend stage events")
++if not (events["KV_APPEND_FENCE"] < events["QK_LAST_ISSUE"]
++        < events["SFM_SV_ELIGIBLE"] < events["SV_LAST_ISSUE"]):
++    raise SystemExit(f"FAIL: invalid phase order {events}")
++if int(last.group(1)) != events["SV_LAST_ISSUE"]:
++    raise SystemExit("FAIL: last SV cycle differs from stage callback")
++
++logs = Path("log/tier_decode_step")
++commands = {}
++for channel in (2, 5):
++    path = logs / f"cmd.log.ch{channel}"
++    if not path.exists():
++        raise SystemExit(f"FAIL: no controller log for channel {channel}")
++    pairs = []
++    for line in path.read_text().splitlines():
++        match = re.match(r"\s*(\d+),\s*(\w+),", line)
++        if match:
++            pairs.append((int(match.group(1)), match.group(2)))
++    commands[channel] = pairs
++
++sfm = [(cycle, channel) for channel, pairs in commands.items()
++       for cycle, opcode in pairs if opcode == "SFM"]
++if len(sfm) != 1 or sfm[0][1] != 2:
++    raise SystemExit(f"FAIL: expected one SFM on routing channel 2, got {sfm}")
++if sfm[0][0] <= events["QK_LAST_ISSUE"]:
++    raise SystemExit("FAIL: SFM issued before QK gate")
++for channel in (2, 5):
++    pairs = commands[channel]
++    if not any(opcode == "MACAB" and cycle < sfm[0][0]
++               for cycle, opcode in pairs):
++        raise SystemExit(f"FAIL: channel {channel} did not issue a QK MAC")
++    moves = [cycle for cycle, opcode in pairs
++             if opcode == "MVSB" and cycle < sfm[0][0]]
++    if not moves or max(moves) > events["QK_LAST_ISSUE"]:
++        raise SystemExit(f"FAIL: channel {channel} has no gated score move")
++    sv_input = [cycle for cycle, opcode in pairs if opcode == "MVGB"]
++    sv_mac = [cycle for cycle, opcode in pairs
++              if opcode == "MACAB" and cycle > sfm[0][0]]
++    if not sv_input or min(sv_input) <= sfm[0][0] or not sv_mac or \
++            min(sv_mac) <= min(sv_input):
++        raise SystemExit(f"FAIL: channel {channel} SV input/MAC order is invalid")
++print("PASS: both QK/SV channels, gated scores, SFM, SV input/MAC order")
+diff --git a/pim_ramulator_src/verify_tier_decode_workload.py b/pim_ramulator_src/verify_tier_decode_workload.py
+new file mode 100644
+index 0000000..7dc5934
+--- /dev/null
++++ b/pim_ramulator_src/verify_tier_decode_workload.py
+@@ -0,0 +1,59 @@
++"""Check the sample multi-request workload's phase and token timeline."""
++import re
++import sys
++from pathlib import Path
++
++if len(sys.argv) != 2:
++    raise SystemExit("usage: python3 verify_tier_decode_workload.py RUN_OUTPUT")
++
++out = Path(sys.argv[1]).read_text()
++phases = {}
++for name, cycle, request_id, token_index in re.findall(
++    r"TIER_PHASE head=0 event=(\w+) cycle=(\d+) "
++    r"request_id=(\d+) token_index=(\d+)", out
++):
++    key = (int(request_id), int(token_index))
++    phases.setdefault(key, {})[name] = int(cycle)
++
++tokens = {}
++for request_id, token, last_issue, complete in re.findall(
++    r"TIER_TOKEN request_id=(\d+) token=(\d+) "
++    r"last_sv_issue_cycle=(\d+) completion_cycle=(\d+)", out
++):
++    tokens[(int(request_id), int(token))] = (int(last_issue), int(complete))
++
++expected = {(1, 33), (1, 34), (2, 33), (3, 33)}
++if set(phases) != expected or set(tokens) != {(1, 1), (1, 2), (2, 1), (3, 1)}:
++    raise SystemExit(f"FAIL: missing request/token phases: {phases.keys()} {tokens.keys()}")
++
++sfm_cycles = []
++for request_id, token_index in expected:
++    timeline = phases[(request_id, token_index)]
++    required = ("QK_LAST_ISSUE", "SFM_SV_ELIGIBLE", "SV_LAST_ISSUE")
++    if any(name not in timeline for name in required):
++        raise SystemExit(f"FAIL: missing attention phase: {(request_id, token_index)}")
++    qk, sfm, sv = (timeline[name] for name in required)
++    last_issue, complete = tokens[(request_id, token_index - 32)]
++    if not (qk < sfm < sv == last_issue and complete >= sv + 16):
++        raise SystemExit(f"FAIL: invalid phase/tail cycle: {(request_id, token_index)}")
++    sfm_cycles.append(sfm)
++
++if len(set(sfm_cycles)) != len(sfm_cycles):
++    raise SystemExit("FAIL: shared buffer-die SFM issued twice in one cycle")
++if tokens[(1, 2)][1] <= tokens[(1, 1)][1]:
++    raise SystemExit("FAIL: request 1 tokens completed out of order")
++
++reported = re.findall(
++    r"TIER_REQUEST request_id=(\d+) arrival_cycle=(\d+) "
++    r"admitted_cycle=(\d+) first_token_cycle=(\d+) completion_cycle=(\d+)",
++    out,
++)
++if len(reported) != 3:
++    raise SystemExit("FAIL: some requests did not complete")
++for request_id, arrival, admitted, first_token, completion in reported:
++    request_id, arrival, admitted = map(int, (request_id, arrival, admitted))
++    first_token, completion = int(first_token), int(completion)
++    if not (arrival <= admitted <= first_token <= completion):
++        raise SystemExit(f"FAIL: invalid request timeline for {request_id}")
++
++print("PASS: three requests, four tokens, head-wide SFM and token completion")
+diff --git a/pim_ramulator_src/verify_tier_shared_workload.py b/pim_ramulator_src/verify_tier_shared_workload.py
+new file mode 100644
+index 0000000..5b696ca
+--- /dev/null
++++ b/pim_ramulator_src/verify_tier_shared_workload.py
+@@ -0,0 +1,72 @@
++"""Check row separation and phase leases in the shared-channel probe."""
++import re
++import sys
++from pathlib import Path
++
++if len(sys.argv) != 2:
++    raise SystemExit("usage: python3 verify_tier_shared_workload.py RUN_OUTPUT")
++
++out = Path(sys.argv[1]).read_text()
++regions = {int(request_id): int(row) for request_id, row in re.findall(
++    r"TIER_KV_REGION request_id=(\d+) row_offset=(\d+)", out)}
++if regions != {1: 0, 2: 8}:
++    raise SystemExit(f"FAIL: request row windows overlap or are missing: {regions}")
++
++leases = [(int(request_id), phase, event, int(cycle),
++           int(channel_count or 0), int(last_issue or 0))
++          for request_id, phase, event, cycle, channel_count, last_issue in re.findall(
++              r"TIER_LEASE request_id=(\d+) phase=(QK_LAST_ISSUE|SV_LAST_ISSUE) "
++              r"event=(ACQUIRE|RELEASE) cycle=(\d+)"
++              r"(?: channels=(\d+)| last_issue_cycle=(\d+))?", out)]
++active = None
++intervals = {(request_id, phase): [] for request_id in (1, 2)
++             for phase in ("QK_LAST_ISSUE", "SV_LAST_ISSUE")}
++for request_id, phase, event, cycle, channel_count, last_issue in leases:
++    if event == "ACQUIRE":
++        if active is not None or channel_count != 3:
++            raise SystemExit("FAIL: overlapping phase leases or idle channels leased")
++        active = (request_id, phase, cycle)
++    else:
++        if active is None or active[:2] != (request_id, phase) or cycle < active[2]:
++            raise SystemExit("FAIL: invalid shared channel release")
++        if cycle < last_issue + (4 if phase == "SV_LAST_ISSUE" else 0):
++            raise SystemExit("FAIL: PIM channel released before its modeled drain")
++        intervals[request_id, phase].append((active[2], cycle))
++        active = None
++if active is not None or [len(intervals[request_id, phase]) for request_id, phase
++                          in intervals] != [2, 2, 1, 1]:
++    raise SystemExit(f"FAIL: incomplete QK/SV phase leases: {intervals}")
++
++first_qk_end = intervals[1, "QK_LAST_ISSUE"][0][1]
++second_qk_start = intervals[2, "QK_LAST_ISSUE"][0][0]
++first_sv_start = intervals[1, "SV_LAST_ISSUE"][0][0]
++if not (first_qk_end <= second_qk_start < first_sv_start):
++    raise SystemExit("FAIL: request 2 did not enter before request 1's SV")
++
++rows = {1: set(), 2: set()}
++for line in Path("log/tier_shared_workload/cmd.log.ch2").read_text().splitlines():
++    fields = [field.strip() for field in line.split(",")]
++    if len(fields) < 9 or fields[1] != "WR":
++        continue
++    row = int(fields[7])
++    matched = False
++    for request_id, offset in regions.items():
++        if offset <= row < offset + 8 or 8192 + offset <= row < 8192 + offset + 8:
++            rows[request_id].add(row)
++            matched = True
++    if not matched:
++        raise SystemExit(f"FAIL: K/V write outside reserved rows: {row}")
++if not rows[1] or not rows[2] or rows[1] & rows[2]:
++    raise SystemExit(f"FAIL: KV rows missing or shared: {rows}")
++
++sfm = [line for line in Path("log/tier_shared_workload/cmd.log.ch0")
++       .read_text().splitlines() if ", SFM," in line]
++tokens = re.findall(r"TIER_TOKEN request_id=(\d+) token=(\d+) .*completion_cycle=(\d+)", out)
++if len(sfm) != 3 or len(tokens) != 3 or len(re.findall(r"TIER_REQUEST request_id=", out)) != 2:
++    raise SystemExit("FAIL: missing SFM, token, or completed request")
++first_completion = next(int(cycle) for request_id, token, cycle in tokens
++                        if request_id == "1" and token == "1")
++if intervals[1, "SV_LAST_ISSUE"][0][1] >= first_completion:
++    raise SystemExit("FAIL: shared channels were held during non-PIM token delay")
++
++print("PASS: two shared requests, isolated K/V rows, QK/SV leases, overlap during idle phases")
+diff --git a/set_pim_ramulator.sh b/set_pim_ramulator.sh
+index acd3d70..cf2cdcd 100644
+--- a/set_pim_ramulator.sh
++++ b/set_pim_ramulator.sh
+@@ -1,7 +1,19 @@
+-## initialize ramulator2 
+-cd ramulator2
+-git reset --hard b7c70275f04126c647edb989270cc429776955d1
+-cd ..
++#!/usr/bin/env bash
++set -eu
++
++# Apply the overlay only to the pinned, clean submodule checkout.
++if [ "$(git -C ramulator2 rev-parse HEAD)" != "b7c70275f04126c647edb989270cc429776955d1" ] ||
++   [ -n "$(git -C ramulator2 status --porcelain)" ]; then
++    echo "ramulator2 must be a clean checkout of b7c7027" >&2
++    exit 1
++fi
++
++# The original request header has CRLF, while its enum patch expects LF.
++python3 - <<'PY'
++from pathlib import Path
++path = Path('ramulator2/src/base/request.h')
++path.write_bytes(path.read_bytes().replace(b'\r\n', b'\n'))
++PY
+ 
+ # copy files
+ cp pim_ramulator_src/attacc_bank.yaml ramulator2/
+@@ -18,14 +30,28 @@ cp pim_ramulator_src/all_bank_refresh_hbm3.cpp ramulator2/src/dram_controller/im
+ cp pim_ramulator_src/no_refresh.cpp ramulator2/src/dram_controller/impl/refresh/
+ cp pim_ramulator_src/pim_scheduler.cpp ramulator2/src/dram_controller/impl/scheduler/
+ cp pim_ramulator_src/pim_loadstore_trace.cpp ramulator2/src/frontend/impl/memory_trace/
++cp pim_ramulator_src/tier_decode_step_frontend.cpp ramulator2/src/frontend/impl/memory_trace/
++cp -r pim_ramulator_src/tier_runtime ramulator2/src/
++cp pim_ramulator_src/tier_decode_step.yaml ramulator2/
++cp pim_ramulator_src/tier_decode_workload.yaml ramulator2/
++cp pim_ramulator_src/tier_decode_workload.csv ramulator2/
++cp pim_ramulator_src/tier_shared_workload.yaml ramulator2/
++cp pim_ramulator_src/tier_shared_workload.csv ramulator2/
+ cp pim_ramulator_src/PIM_DRAM_system.cpp ramulator2/src/memory_system/impl/
+ cp -r pim_ramulator_src/trace_gen ramulator2/
+ cp -r pim_ramulator_src/patches ramulator2/
+ 
+ # Apply patches
+-cd ramulator2;
++cd ramulator2
+ 
+ for f in ./patches/*.patch
+ do
+-    patch -p1 < $f
++    if [ "$(basename "$f")" = src_frontend_tier_decode.patch ]; then
++        python3 - <<'PY'
++from pathlib import Path
++path = Path('src/frontend/CMakeLists.txt')
++path.write_bytes(path.read_bytes().replace(b'\r\n', b'\n').rstrip(b'\n') + b'\n')
++PY
++    fi
++    patch --batch --forward -p1 < "$f"
+ done

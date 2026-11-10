@@ -1,0 +1,31 @@
+diff --git a/src/frontend/CMakeLists.txt b/src/frontend/CMakeLists.txt
+--- a/src/frontend/CMakeLists.txt
++++ b/src/frontend/CMakeLists.txt
+@@ -13,3 +13,27 @@ target_link_libraries(
+   PRIVATE
+   ramulator-frontend
+ )
++
++target_sources(ramulator-frontend PRIVATE
++  impl/memory_trace/tier_decode_step_frontend.cpp
++  ../tier_runtime/kv_block_shape.cpp
++  ../tier_runtime/row_aligned_kv_layout.cpp
++  ../tier_runtime/kv_capacity_model.cpp
++  ../tier_runtime/ordered_block_mapper.cpp
++  ../tier_runtime/kv_address_mapper.cpp
++  ../tier_runtime/attacc_address_encoder.cpp
++  ../tier_runtime/pim_command_generator.cpp
++  ../tier_runtime/pim_command_generator_sv.cpp
++  ../tier_runtime/tier_channel_runtime.cpp
++  ../tier_runtime/tier_channel_scheduler.cpp
++  ../tier_runtime/shared_channel_space.cpp
++  ../tier_runtime/runtime_decode_command_builder.cpp
++  ../tier_runtime/qk_issue_gate.cpp
++  ../tier_runtime/qk_phase_submitter.cpp
++  ../tier_runtime/softmax_phase_submitter.cpp
++  ../tier_runtime/decode_step_driver.cpp
++)
++
++target_include_directories(ramulator-frontend PRIVATE
++  ${CMAKE_CURRENT_SOURCE_DIR}/../tier_runtime/include
++)

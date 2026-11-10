@@ -1,0 +1,3 @@
+# request_id,arrival_cycle,prompt_tokens,predicted_output_tokens,actual_output_tokens
+1,0,33,2,2
+2,0,33,1,1

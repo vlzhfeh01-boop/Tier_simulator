@@ -1,0 +1,5 @@
+diff --git a/src/base/utils.h b/src/base/utils.h
+--- a/src/base/utils.h
++++ b/src/base/utils.h
+@@ -3,0 +4 @@
++#include <cstdint>

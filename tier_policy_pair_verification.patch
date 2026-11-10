@@ -1,0 +1,275 @@
+diff --git a/pim_ramulator_src/tier_policy_pair_tier.yaml b/pim_ramulator_src/tier_policy_pair_tier.yaml
+new file mode 100644
+index 0000000..50dcda7
+--- /dev/null
++++ b/pim_ramulator_src/tier_policy_pair_tier.yaml
+@@ -0,0 +1,37 @@
++Frontend:
++  impl: TierDecodeStep
++  clock_ratio: 1
++  workload_path: ./tier_shared_workload.csv
++  shared_channels: false
++  shared_region_rows: 8
++  softmax_delay_cycles: 0
++  sv_drain_cycles: 4
++  context_merge_cycles: 2
++  non_pim_cycles: 10
++  max_cycles: 5000
++  Translation:
++    impl: NoTranslation
++    max_addr: 2147483648
++
++MemorySystem:
++  impl: PIMDRAM
++  clock_ratio: 1
++  DRAM:
++    impl: HBM3-PIM
++    org:
++      preset: HBM3_8Gb_2R
++      channel: 16
++    timing:
++      preset: HBM3_5.2Gbps
++  Controller:
++    impl: HBM3-PIM
++    Scheduler:
++      impl: PIM
++    RefreshManager:
++      impl: No
++    plugins:
++      - ControllerPlugin:
++          impl: HBM3TraceRecorder
++          path: ./log/tier_policy_pair_tier/cmd.log
++  AddrMapper:
++    impl: HBM3-PIM
+diff --git a/pim_ramulator_src/verify_tier_policy_pair.py b/pim_ramulator_src/verify_tier_policy_pair.py
+new file mode 100644
+index 0000000..6786f21
+--- /dev/null
++++ b/pim_ramulator_src/verify_tier_policy_pair.py
+@@ -0,0 +1,151 @@
++"""Check matched Tier/shared decode timelines and print descriptive cycle deltas."""
++
++import argparse
++import csv
++import re
++from pathlib import Path
++
++
++ADMIT = re.compile(r"^TIER_ADMIT request_id=(\d+) cycle=(\d+) channels=(\d+)$", re.M)
++TOKEN = re.compile(
++    r"^TIER_TOKEN request_id=(\d+) token=(\d+) "
++    r"last_sv_issue_cycle=(\d+) completion_cycle=(\d+)$", re.M
++)
++REQUEST = re.compile(
++    r"^TIER_REQUEST request_id=(\d+) arrival_cycle=(\d+) "
++    r"admitted_cycle=(\d+) first_token_cycle=(\d+) completion_cycle=(\d+)$", re.M
++)
++PHASE = re.compile(
++    r"^TIER_PHASE head=(\d+) event=(\w+) cycle=(\d+) "
++    r"request_id=(\d+) token_index=(\d+)$", re.M
++)
++PHASE_NAMES = (
++    "KV_APPEND_FENCE", "QK_LAST_ISSUE", "SFM_SV_ELIGIBLE",
++    "SV_LAST_ISSUE", "CONTEXT_MERGE_ZERO_COST",
++)
++TAIL_CYCLES = 4 + 2 + 10  # sv_drain + context_merge + non_pim in both YAML files.
++
++
++def require(condition, message):
++    if not condition:
++        raise ValueError(message)
++
++
++def read_workload(path):
++    specs = {}
++    with path.open(newline="") as stream:
++        for row in csv.reader(line for line in stream if line.strip() and
++                              not line.lstrip().startswith("#")):
++            require(len(row) == 5, f"bad workload row: {row}")
++            request_id, arrival, prompt, predicted, actual = map(int, row)
++            require(request_id not in specs and actual > 0,
++                    f"duplicate request or invalid output length: {request_id}")
++            specs[request_id] = (arrival, prompt, predicted, actual)
++    require(specs, "empty workload")
++    return specs
++
++
++def parse_run(path, mode, specs):
++    output = path.read_text()
++    require("Tier decode workload exceeded max_cycles" not in output,
++            f"{mode}: exceeded max_cycles")
++    admits, reports, tokens, phases = {}, {}, {}, {}
++
++    for rid, cycle, channels in ADMIT.findall(output):
++        rid = int(rid)
++        require(rid not in admits, f"{mode}: repeated admission: {rid}")
++        admits[rid] = (int(cycle), int(channels))
++    for rid, arrival, admitted, first, complete in REQUEST.findall(output):
++        rid = int(rid)
++        require(rid not in reports, f"{mode}: repeated completion: {rid}")
++        reports[rid] = tuple(map(int, (arrival, admitted, first, complete)))
++    for rid, number, issue, complete in TOKEN.findall(output):
++        key = (int(rid), int(number))
++        require(key not in tokens, f"{mode}: repeated token: {key}")
++        tokens[key] = (int(issue), int(complete))
++    for head, event, cycle, rid, index in PHASE.findall(output):
++        key = (int(rid), int(index))
++        require(head == "0" and event in PHASE_NAMES,
++                f"{mode}: unexpected head or phase: {key}, {head}, {event}")
++        phases.setdefault(key, {})
++        require(event not in phases[key], f"{mode}: repeated phase: {key}, {event}")
++        phases[key][event] = int(cycle)
++
++    require(set(admits) == set(reports) == set(specs),
++            f"{mode}: missing or extra request")
++    expected_tokens = {(rid, number) for rid, (_, _, _, actual) in specs.items()
++                       for number in range(1, actual + 1)}
++    expected_phases = {(rid, prompt + number - 1)
++                       for rid, (_, prompt, _, actual) in specs.items()
++                       for number in range(1, actual + 1)}
++    require(set(tokens) == expected_tokens and set(phases) == expected_phases,
++            f"{mode}: missing or extra token phase")
++    require(("TIER_LEASE request_id=" in output) == (mode == "shared"),
++            f"{mode}: unexpected execution policy")
++
++    for rid, (arrival, prompt, _predicted, actual) in specs.items():
++        reported_arrival, admitted, first, complete = reports[rid]
++        admit_cycle, channel_count = admits[rid]
++        require(reported_arrival == arrival and admit_cycle == admitted and
++                arrival <= admitted <= first <= complete,
++                f"{mode}: inconsistent request timeline: {rid}")
++        require(channel_count == (16 if mode == "shared" else 1),
++                f"{mode}: unexpected initial channel count: {rid}, {channel_count}")
++        previous_completion = -1
++        for number in range(1, actual + 1):
++            issue, token_completion = tokens[rid, number]
++            events = phases[rid, prompt + number - 1]
++            expected_events = set(PHASE_NAMES)
++            if mode == "tier":
++                # One active channel needs no cross-channel context merge.
++                expected_events.remove("CONTEXT_MERGE_ZERO_COST")
++            require(set(events) == expected_events,
++                    f"{mode}: incomplete phase sequence: {rid}, {number}")
++            kv, qk, sfm, sv = (events[name] for name in PHASE_NAMES[:4])
++            merge = events.get("CONTEXT_MERGE_ZERO_COST", sv)
++            require(kv < qk < sfm < sv == merge == issue and
++                    token_completion == issue + TAIL_CYCLES and
++                    token_completion > previous_completion,
++                    f"{mode}: invalid token timing: {rid}, {number}")
++            previous_completion = token_completion
++        require(first == tokens[rid, 1][1] and
++                complete == tokens[rid, actual][1],
++                f"{mode}: request completion does not match token logs: {rid}")
++    return reports, tokens
++
++
++def main():
++    parser = argparse.ArgumentParser(description=__doc__)
++    parser.add_argument("workload", type=Path)
++    parser.add_argument("tier_output", type=Path)
++    parser.add_argument("shared_output", type=Path)
++    args = parser.parse_args()
++    specs = read_workload(args.workload)
++    tier, tier_tokens = parse_run(args.tier_output, "tier", specs)
++    shared, shared_tokens = parse_run(args.shared_output, "shared", specs)
++
++    print("PASS: identical requests and token counts; both phase timelines valid")
++    print("delta = shared - tier (cycles; positive means shared finished later)")
++    print("request_id  tier_admit_wait  shared_admit_wait  "
++          "tier_first_token  shared_first_token  tier_complete  shared_complete  delta")
++    for rid, (arrival, _, _, actual) in sorted(specs.items()):
++        ta, sa = tier[rid], shared[rid]
++        print(f"{rid:10d}  {ta[1] - arrival:15d}  {sa[1] - arrival:17d}  "
++              f"{ta[2]:16d}  {sa[2]:18d}  {ta[3]:13d}  {sa[3]:15d}  "
++              f"{sa[3] - ta[3]:+d}")
++        for number in range(1, actual + 1):
++            tc = tier_tokens[rid, number][1]
++            sc = shared_tokens[rid, number][1]
++            print(f"  token {number}: tier={tc}, shared={sc}, delta={sc - tc:+d}")
++    start = min(arrival for arrival, *_ in specs.values())
++    end_tier = max(row[3] for row in tier.values())
++    end_shared = max(row[3] for row in shared.values())
++    print(f"makespan: tier={end_tier - start}, shared={end_shared - start}")
++    print("This probe does not establish goodput, tail latency, or policy superiority.")
++
++
++if __name__ == "__main__":
++    try:
++        main()
++    except (OSError, ValueError) as error:
++        raise SystemExit(f"FAIL: {error}") from error
+diff --git a/pim_ramulator_src/README_tier_policy_pair.md b/pim_ramulator_src/README_tier_policy_pair.md
+new file mode 100644
+index 0000000..02ffadd
+--- /dev/null
++++ b/pim_ramulator_src/README_tier_policy_pair.md
+@@ -0,0 +1,69 @@
++# 동일 workload의 Tier/Shared 타이밍 비교 검증
++
++이 검증은 앞서 통과한 `tier_shared_workload.csv`의 두 요청을 같은 HBM3-PIM 장치에서
++Tier 독점 할당과 16채널 공유 할당으로 각각 실행한다. **정책별 실행 경로와 요청·토큰
++완료 사이클이 일관되게 기록되는지 확인하는 작은 통합 검증**이다.
++
++## 추가 파일
++
++| 파일 | 프로젝트 내 위치 | 역할 |
++| --- | --- | --- |
++| `tier_policy_pair_tier.yaml` | `pim_ramulator_src/` → 실행 전에 `ramulator2/`에 복사 | 기존 shared YAML과 동일한 CSV·타이밍·하드웨어를 쓰고 `shared_channels: false`로 실행한다. Tier 전용 trace 경로를 사용한다. |
++| `verify_tier_policy_pair.py` | `pim_ramulator_src/` | 두 실행 로그에서 요청별 admission, phase, token, 완료 사이클을 검사하고 차이를 출력한다. |
++
++기존의 `tier_shared_workload.yaml`, `tier_shared_workload.csv`,
++`verify_tier_shared_workload.py`를 그대로 사용한다. C++ 변경과 재빌드는 필요 없다.
++
++## 실행
++
++`ramulator2/` 디렉터리에서 실행한다.
++
++```bash
++cp ../pim_ramulator_src/tier_policy_pair_tier.yaml .
++
++LD_LIBRARY_PATH="$PWD${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
++  ./build_desktop/ramulator2 -f tier_policy_pair_tier.yaml \
++  > tier_policy_pair_tier.out 2>&1
++
++LD_LIBRARY_PATH="$PWD${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
++  ./build_desktop/ramulator2 -f tier_shared_workload.yaml \
++  > tier_shared_workload.out 2>&1
++
++python3 ../pim_ramulator_src/verify_tier_shared_workload.py \
++  tier_shared_workload.out
++
++python3 ../pim_ramulator_src/verify_tier_policy_pair.py \
++  tier_shared_workload.csv \
++  tier_policy_pair_tier.out tier_shared_workload.out
++```
++
++실행이 정상 종료돼야 trace recorder의 파일도 완전히 저장된다.
++
++## 무엇을 검사하는가
++
++1. 두 로그의 요청 ID, 도착 시각, 토큰 개수와 토큰 번호가 공통 CSV와 일치한다.
++2. 각 토큰의 KV append → QK 발행 → SFM 완료 → SV 발행 순서가 성립한다.
++   Shared는 여러 채널의 context merge 완료 이벤트를 기록하고, 이 예제의 Tier는
++   활성 채널이 하나라서 그 이벤트가 없다.
++3. 두 모드 모두 SV의 마지막 발행에서 토큰 완료까지 `4 + 2 + 10 = 16`사이클을
++   적용한다. 두 YAML에서 `sv_drain_cycles`, `context_merge_cycles`,
++   `non_pim_cycles`를 변경하면 검증 스크립트의 `TAIL_CYCLES`도 바꿔야 한다.
++4. 이 예제에서 Tier는 요청당 채널 1개를 할당한다. Shared는 각 요청에 16개 채널의
++   주소 공간을 제공하지만 실제 QK/SV에는 활성 채널 3개만 lease한다.
++5. 기존 shared 검증 스크립트는 별도로 KV row 분리와 QK/SV lease 겹침 방지를 검사한다.
++
++출력하는 `delta`는 `shared 완료 사이클 - tier 완료 사이클`이다. 두 요청이 모두
++사이클 0에 도착하므로 전체 `makespan`은 마지막 완료 사이클과 같다. 이 숫자는
++시뮬레이션의 요청·토큰 완료 시점이며 실제 모델의 TTFT 전체를 뜻하지 않는다.
++
++## 결과의 한계와 다음 단계
++
++이 workload에서는 Tier가 두 요청을 서로 다른 채널에서 실행하고, Shared는
++세 활성 채널에서 QK/SV phase lease를 순차적으로 사용한다. 따라서 이 결과는
++**공유 채널에서의 경합이 타이밍에 반영되는지 확인하는 사례**다. 두 요청만으로
++Goodput, p95/p99 지연, 공정성 또는 Tier의 일반적 우위를 결론 내릴 수 없다.
++
++다음에는 같은 요청 도착·길이 시퀀스를 정책별로 반복 실행하고, SLO를 먼저 정한 뒤
++Goodput과 admission 대기 및 token 간격의 분포를 수집해야 한다. Shared의 row window
++용량과 Tier의 채널 수용량 차이 때문에 admission이 달라지는 사례도 별도로 분리해
++해석해야 한다.

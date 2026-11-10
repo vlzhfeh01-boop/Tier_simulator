@@ -52,7 +52,7 @@ namespace Ramulator {
     } // namespace
 
     // All admitted Tier requests use the same command generator and phase driver.
-    // Channel ownership is exclusive; shared-channel KV placement is not modeled.
+    // Exclusive Tier requests and shared-channel requests use the same phase driver.
     class TierDecodeStepFrontend final : public IFrontEnd, public Implementation {
         RAMULATOR_REGISTER_IMPLEMENTATION(
             IFrontEnd, TierDecodeStepFrontend, "TierDecodeStep",
@@ -198,7 +198,7 @@ namespace Ramulator {
                     // 0부터 1씩 증가하면서 벡터를 채운다.
                     std::iota(all_channels.begin(), all_channels.end(),0);
                     item->shared_runtime->admit(request,std::move(all_channels),m_clk);
-                    std::cout << "TIER_KV_REGION request_id = " << request.spec.request_id
+                    std::cout << "TIER_KV_REGION request_id=" << request.spec.request_id
                               << " row_offset=" <<
                                 m_shared_space->row_offset(request.spec.request_id) << '\n';
                 // Tier 의 경우
