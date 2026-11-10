@@ -12,11 +12,12 @@ namespace Ramulator::TierRuntime {
         std::uint64_t non_pim_cycles = 0;
     };
 
-    class TokenComletionModel {
+    class TokenCompletionModel {
     public:
-        explicit TokenComletionModel(TokenCompletionConfig config) : m_config(config)
+        explicit TokenCompletionModel(TokenCompletionConfig config) : m_config(config){}
 
-        [[nodiscard]] std::uint64_t earliest_cycle(std::uint64_t last_sv_issue) const {
+        [[nodiscard]] std::uint64_t earliest_cycle(std::uint64_t last_sv_issue) const
+        {
             auto cycle = last_sv_issue;
             for (const auto delay : {m_config.sv_drain_cycles,
                                     m_config.context_merge_cycles,

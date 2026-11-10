@@ -88,7 +88,7 @@ namespace Ramulator {
         std::unique_ptr<TierRuntime::TierChannelRuntime> m_runtime;
         TierRuntime::FirstFreeChannelPolicy m_policy;
         std::unique_ptr<TierRuntime::TierChannelScheduler> m_scheduler;
-        TierRuntime::TokenComletionModel m_completion{{}};
+        TierRuntime::TokenCompletionModel m_completion{{}};
         std::unique_ptr<TierRuntime::SharedKVRowSpace> m_shared_space;
         TierRuntime::ChannelPhaseGuard m_channel_guard{16}; // 채널 16개
         std::vector<std::unique_ptr<WorkItem>> m_requests;
@@ -115,6 +115,7 @@ namespace Ramulator {
             }
             return value;
         }
+
         void load_workload() {
             std::ifstream stream(m_workload_path);
             if(!stream) {
@@ -123,13 +124,407 @@ namespace Ramulator {
             std::unordered_set<std::int64_t> ids;
             std::string line;
             while(std::getline(stream,line)) {
+                // 공백, 탭, 캐리지 리턴이 아닌 첫 번쨰 유효한 글자의 위치를 찾는다.
                 if(line.find_first_not_of(" \t\r") == std::string::npos || 
                    line[line.find_first_not_of(" \t\r")] == '#') {
                     continue;
                 }
                 std::istringstream input(line);
                 std::vector<std::string> fields;
+                std::string field;
+                while(std::getline(input,field,',')) {
+                    fields.push_back(field);
+                }
+                if(fields.size() != 5) {
+                    throw std::invalid_argument("workload needs id,arrival,prompt,predicted,actual");
+                }
+                const auto id = parse_integer(fields[0]);
+                const auto arrival = parse_integer(fields[1]);
+                const auto prompt = parse_integer(fields[2]);
+                const auto predicted = parse_integer(fields[3]);
+                const auto actual = parse_integer(fields[4]);
+                if(id > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()) || 
+                    arrival > static_cast<std::uint64_t>(std::numeric_limits<Clk_t>::max()) || 
+                    prompt > std::numeric_limits<std::uint32_t>::max() ||
+                    predicted > std::numeric_limits<std::uint32_t>::max() ||
+                    actual == 0 || actual > std::numeric_limits<std::uint32_t>::max() ||
+                    !ids.insert(static_cast<std::int64_t>(id)).second) {
+                        throw std::invalid_argument("invalid or repeated request workload entry");
+                }
+                auto item = std::make_unique<WorkItem>();
+                auto& spec = item->request.spec;
+                spec.request_id = static_cast<std::int64_t>(id);
+                spec.arrival_cycle = static_cast<Clk_t>(arrival);
+                spec.prompt_tokens = static_cast<std::uint32_t>(prompt);
+                spec.predicted_output_tokens = static_cast<std::uint32_t>(predicted);
+                spec.actual_output_tokens = static_cast<std::uint32_t>(actual);
+                spec.max_output_tokens = spec.actual_output_tokens;
+                if(m_runtime->predicted_initial_channel_count(spec) > 16 || 
+                    m_capacity->required_channels_for_tokens(
+                        m_capacity->total_tokens(prompt,actual)) > 16) {
+                    throw std::invalid_argument("request exceeds 16 physical Tier channels");
+                }
+                if(m_share_channels && 
+                    (m_capacity->total_tokens(prompt,predicted) >
+                        m_shared_region_rows * m_layout->tokens_per_row() * 16 || 
+                    m_capacity->total_tokens(prompt,actual) > 
+                        m_shared_region_rows * m_layout->tokens_per_row() * 16)) {
+                    throw std::invalid_argument("request exceeds its shared KV row window");
+                }
+                m_requests.push_back(std::move(item));
             }
+            if (!stream.eof() || m_requests.empty()) {
+                throw std::invalid_argument("empty or unreadable request workload");
+            }
+            std::stable_sort(m_requests.begin(),m_requests.end(),
+            [](const auto& a, const auto& b) {
+                return a->request.spec.arrival_cycle < b->request.spec.arrival_cycle;
+            });
+        }
+
+        void admit_waiting() {
+            for(auto& item : m_requests) {
+                auto& request = item->request;
+                if(request.state != TierRuntime::RequestState::Waiting) {
+                    continue;
+                }
+                if(request.spec.arrival_cycle > m_clk) break;
+                // shared tier의 경우
+                if(m_share_channels) {
+                    if(!m_shared_space -> reserve(request.spec.request_id)) break;
+                    item->shared_runtime = std::make_unique<TierRuntime::TierChannelRuntime> (
+                        *m_capacity, *m_mapper, 16);
+                    std::vector<int> all_channels(16);
+                    // 0부터 1씩 증가하면서 벡터를 채운다.
+                    std::iota(all_channels.begin(), all_channels.end(),0);
+                    item->shared_runtime->admit(request,std::move(all_channels),m_clk);
+                    std::cout << "TIER_KV_REGION request_id = " << request.spec.request_id
+                              << " row_offset=" <<
+                                m_shared_space->row_offset(request.spec.request_id) << '\n';
+                // Tier 의 경우
+                } else if(!m_scheduler->try_admit(request,m_clk)) {
+                    break; // FIFO : a later arrival cannot bypass this request.
+                }
+                std::cout << "TIER_ADMIT request_id=" << request.spec.request_id
+                      << " cycle=" << m_clk
+                      << " channels=" << request.allocated_channels.size() << '\n';
+            }
+        }
+
+        bool send_command(WorkItem& item, const TierRuntime::PIMCommand& cmd,
+                          TierRuntime::DecodeStepDriver::IssueCallback on_issue) {
+            const auto mapped = m_share_channels ? m_shared_space->translate(item.request.spec.request_id, cmd) : cmd;
+            if (mapped.address >
+                static_cast<std::uint64_t>(std::numeric_limits<Addr_t>::max())) {
+                throw std::overflow_error("PIM address exceeds signed Addr_t");
+            }
+            const int type = request_type(cmd.opcode);
+            if ((type == Request::Type::Write || type == Request::Type::StoreFence) &&
+                on_issue) {
+                throw std::logic_error("write/fence cannot report a PIM issue");
+            }
+            // A single buffer-die SFM unit serves one head at a time across channels.
+            if (type == Request::Type::PIM_SFM &&
+            (m_sfm_owner || m_last_sfm_submit_cycle ==
+                                static_cast<std::uint64_t>(m_clk))) {
+                return false; // 이번 제출을 거절한다. 
+            }
+            Request req(static_cast<Addr_t>(mapped.address),
+                type, // type_id
+                0,  // source_id
+                [on_issue = std::move(on_issue)](Request& issued) {
+                    if(!on_issue) return;
+                    if(issued.depart < 0) {
+                        throw std::logic_error("PIM issue callback lacks cycle");
+                    }
+                    on_issue(static_cast<std::uint64_t>(issued.depart));
+                });
+            if(!m_memory_system->send(req)) {
+                return false;
+            }
+            if(type == Request::Type::PIM_SFM) {
+                m_sfm_owner = item.request.spec.request_id;
+                m_last_sfm_submit_cycle = static_cast<std::uint64_t>(m_clk);
+            }
+            return true;
+        }
+
+        void release_shared_lease(WorkItem& item, std::uint64_t last_issue_cycle) {
+            if (!m_share_channels || !item.holds_channel_lease ||
+                !item.leased_phase) {
+                throw std::logic_error("request has no shared phase lease to release");
+            }
+            const auto phase = *item.leased_phase;
+            m_channel_guard.release(item.request.spec.request_id, item.leased_channels);
+            item.leased_channels.clear();
+            item.leased_phase.reset();
+            item.holds_channel_lease = false;
+            std::cout << "TIER_LEASE request_id=" << item.request.spec.request_id
+                    << " phase=" << phase_name(phase)
+                    << " event=RELEASE cycle=" << m_clk
+                    << " last_issue_cycle=" << last_issue_cycle << '\n';
+        }
+
+        void finish_token(WorkItem& item) {
+            auto& request = item.request;
+            auto& runtime = m_share_channels ? *item.shared_runtime : *m_runtime;
+            if (item.holds_channel_lease || item.sv_release_cycle) {
+                throw std::logic_error("token completed with a PIM phase lease");
+            }
+            runtime.complete_token(request, m_clk);
+            std::cout << "TIER_TOKEN request_id=" << request.spec.request_id
+                    << " token=" << request.generated_tokens
+                    << " last_sv_issue_cycle=" << item.last_sv_issue_cycle
+                    << " completion_cycle=" << m_clk << '\n';
+            item.token_ready_cycle.reset();
+            if (m_share_channels) {
+                for (std::size_t index = 0; index < m_requests.size(); ++index) {
+                    if (m_requests[index].get() == &item) {
+                        m_next_request_index = (index + 1) % m_requests.size();
+                        break;
+                    }
+                }
+            }
+            if (request.state == TierRuntime::RequestState::Completed) {
+                std::cout << "TIER_REQUEST request_id=" << request.spec.request_id
+                        << " arrival_cycle=" << request.spec.arrival_cycle
+                        << " admitted_cycle=" << request.admitted_cycle
+                        << " first_token_cycle=" << request.first_token_cycle
+                        << " completion_cycle=" << request.completion_cycle << '\n';
+                runtime.release_completed(request);
+                if (m_share_channels) m_shared_space->release(request.spec.request_id);
+            }
+        }
+
+    public:
+        void init() override {
+            m_clock_ratio = param<uint>("clock_ratio").required();
+            m_channel_a = param<int>("channel_a").default_val(2);
+            m_channel_b = param<int>("channel_b").default_val(5);
+            m_prompt_tokens = param<std::uint64_t>("prompt_tokens").default_val(33);
+            m_softmax_delay = param<std::uint64_t>("softmax_delay_cycles").default_val(0);
+            m_sv_drain_cycles = param<std::uint64_t>("sv_drain_cycles").default_val(0);
+            m_share_channels = param<bool>("shared_channels").default_val(false);
+            m_shared_region_rows =
+                param<std::uint64_t>("shared_region_rows").default_val(8);
+            m_workload_path = param<std::string>("workload_path").default_val("");
+            m_max_cycles = param<std::uint64_t>("max_cycles").default_val(1000000);
+            m_completion = TierRuntime::TokenCompletionModel({
+                m_sv_drain_cycles,
+                param<std::uint64_t>("context_merge_cycles").default_val(0),
+                param<std::uint64_t>("non_pim_cycles").default_val(0)});
+            if (m_clock_ratio != 1 || m_channel_a < 0 || m_channel_b < 0 ||
+                m_channel_a == m_channel_b || m_channel_a >= 16 ||
+                m_channel_b >= 16 || m_prompt_tokens > 47 || m_max_cycles == 0 ||
+                (m_share_channels && m_workload_path.empty())) {
+                throw std::invalid_argument(
+                    "TierDecodeStep requires clock_ratio=1, two distinct channels "
+                    "in [0,16), and prompt_tokens <= 47");
+            }
+
+            // The sample uses three 16-token blocks across two initial channels.
+            const TierRuntime::KVBlockShape shape({16, 1, 1, 128, 2});
+            m_layout = std::make_unique<TierRuntime::RowAlignedKVLayout>(
+                shape, TierRuntime::PIMGeometryConfig{2, 2, 4, 4, 16384, 32, 32});
+            m_capacity = std::make_unique<TierRuntime::KVCapacityModel>(*m_layout);
+            m_mapper = std::make_unique<TierRuntime::OrderedBlockMapper>(*m_capacity);
+            m_generator = std::make_unique<TierRuntime::PIMCommandGenerator>(
+                *m_layout, *m_mapper, 16);
+            m_encoder = std::make_unique<TierRuntime::AttAccAddressEncoder>(
+                *m_layout, 16);
+            m_runtime = std::make_unique<TierRuntime::TierChannelRuntime>(
+                *m_capacity, *m_mapper, 16);
+            if (m_share_channels) {
+                m_shared_space = std::make_unique<TierRuntime::SharedKVRowSpace>(
+                    *m_layout, *m_encoder, m_shared_region_rows);
+            }
+            m_scheduler = std::make_unique<TierRuntime::TierChannelScheduler>(
+                *m_runtime, m_policy);
+
+            if (!m_workload_path.empty()) {
+                load_workload();
+            } else {
+                auto item = std::make_unique<WorkItem>();
+                auto& request = item->request;
+                request.spec.request_id = 1;
+                request.spec.prompt_tokens = static_cast<std::uint32_t>(m_prompt_tokens);
+                request.spec.predicted_output_tokens = 1;
+                request.spec.actual_output_tokens = 1;
+                m_runtime->admit(request, {m_channel_a, m_channel_b}, 0);
+                m_requests.push_back(std::move(item));
+            }
+        }
+
+        void tick() override {
+            if(is_finished()){
+                return;
+            }
+            ++m_clk;
+            admit_waiting();
+            const auto start = m_share_channels ? m_next_request_index : 0;
+            // 요청마다 각 요청이 지금 할 수 있는 다음 작업을 시도한다.
+            for(std::size_t offset = 0; offset < m_requests.size(); ++offset) {
+                auto& item = m_requests[(start+offset) % m_requests.size()];
+                auto& request = item->request;
+                if(request.state != TierRuntime::RequestState::Running) continue;
+                if(item->sv_release_cycle && 
+                   static_cast<std::uint64_t>(m_clk) >= *item->sv_release_cycle) {
+                    if(item->leased_phase != TierRuntime::DecodePhase::SV){
+                        throw std::logic_error("SV drain lost its channel lease");
+                    }
+                    release_shared_lease(*item, item->last_sv_issue_cycle);
+                    item->sv_release_cycle.reset();
+                }
+                // 해당 토큰의 명령 발행 + 후속 모델 지연까지 반영
+                if(item->token_ready_cycle) {
+                    if(static_cast<std::uint64_t>(m_clk) >= *item->token_ready_cycle){
+                        finish_token(*item);
+                    }
+                    continue;
+                }
+                if(!item->step) {
+                    // 현재 진행 중인 토큰이 없다면, plan부터 만든다.
+                    auto plan = m_share_channels
+                        ? item->shared_runtime->begin_token(request)
+                        : m_scheduler->try_begin_token(request);
+                    if(!plan) {
+                        if(m_share_channels) {
+                            throw std::logic_error("shared window cannot grow its KV mapping");
+                        }
+                        continue; // Wait for an exclusive growth channel;
+                    }
+                    const auto token_index = plan->token_index;
+                    if(m_share_channels) {
+                        // The existing ST_FENCE is channel-wide. Keep KV append
+                        // and QK in one lease so another request cannot insert a
+                        // store fence into a partially submitted QK stream.
+                        item->qk_channels = m_generator->generate_qk(
+                            TierRuntime::QKCommandInput{
+                                0,0,plan->valid_token_count,
+                                plan->allocated_channel_ids,
+                                plan->initial_channel_count}).active_channel_ids;
+                    }
+                    auto layer = TierRuntime::build_runtime_decode_layer_plan(
+                        request,*plan,0,1,1,*m_generator,*m_encoder);
+                    const auto id = request.spec.request_id;
+                    auto* const work = item.get();
+                    item->step = std::make_unique<TierRuntime::DecodeStepDriver>(
+                        std::move(layer), *m_generator, *m_encoder, m_softmax_delay,
+                        // on phase complete
+                        [this,work,id,token_index](TierRuntime::DecodePhase phase,
+                                            std::uint64_t head, std::uint64_t cycle) {
+                            if(m_share_channels && 
+                                (phase == TierRuntime::DecodePhase::QK || 
+                                phase == TierRuntime::DecodePhase::SV)) {
+                                if(!work->holds_channel_lease || 
+                                    work->leased_phase != phase) {
+                                    throw std::logic_error("shared PIM phase lost its channel lease");
+                                }
+                            
+                                if(phase == TierRuntime::DecodePhase::QK) {
+                                    // 공유 채널 lease 반환
+                                    release_shared_lease(*work,cycle);
+                                } else {
+                                    if(cycle > std::numeric_limits<std::uint64_t>::max() - m_sv_drain_cycles) {
+                                        throw std::overflow_error("SV channel drain cycle overflow");
+                                    }
+                                    // 마지막 SV 발행 사이클 기록, 
+                                    work->last_sv_issue_cycle = cycle;
+                                    work->sv_release_cycle = cycle + m_sv_drain_cycles;
+                                    if(static_cast<std::uint64_t>(m_clk) >= 
+                                        *work->sv_release_cycle) {
+                                            // sv_drain_cycles이후 채널 lease 반환 예약.
+                                            // 잠시 잡아 둔 채널 실행 권한만 반환한다.
+                                            release_shared_lease(*work,cycle);
+                                            work->sv_release_cycle.reset();
+                                    }
+                                }
+                            }
+                            if(phase == TierRuntime::DecodePhase::Softmax) {
+                                // m_sfm_owner 해제.
+                                if(m_sfm_owner != id) {
+                                    throw std::logic_error("shared SFM owner mismatch");
+                                }
+                                m_sfm_owner.reset();
+                            }
+                            std::cout << "TIER_PHASE head=" << head
+                                  << " event=" << phase_name(phase)
+                                  << " cycle=" << cycle
+                                  << " request_id=" << id
+                                  << " token_index=" << token_index << '\n';
+                        });
+                }
+                if(m_share_channels) {
+                    const auto& phase = item->step->pending_phase();
+                    const bool qk_with_append = 
+                        phase.phase == TierRuntime::DecodePhase::KVAppendFence || 
+                        phase.phase == TierRuntime::DecodePhase::QK;
+                    const bool uses_channel_buffers = qk_with_append ||
+                        phase.phase == TierRuntime::DecodePhase::SV;
+                    const auto lease_phase = qk_with_append
+                        ? TierRuntime::DecodePhase::QK : phase.phase;
+                    const auto& channels = qk_with_append
+                        ? item->qk_channels : phase.active_channel_ids;
+                    if (qk_with_append && phase.phase == TierRuntime::DecodePhase::QK &&
+                        phase.active_channel_ids != channels) {
+                        throw std::logic_error("QK participants changed after KV append");
+                    }
+                    if(uses_channel_buffers && !item->holds_channel_lease) {
+                        if(!m_channel_guard.try_acquire(
+                            request.spec.request_id,channels)) {
+                                continue;
+                        }
+                        item->leased_channels = channels;
+                        item->leased_phase = lease_phase;
+                        item->holds_channel_lease = true;
+                        std::cout << "TIER_LEASE request_id=" << request.spec.request_id
+                                << " phase=" << phase_name(lease_phase)
+                                << " event=ACQUIRE cycle=" << m_clk
+                                << " channels=" << item->leased_channels.size() << '\n';
+                    } else if(uses_channel_buffers && item->leased_phase != lease_phase) {
+                        // 이전 SV의 drain이 아직 끝나지 않은 경우. 
+                        // 이번 사이클은 기다린다.
+                        if(item->leased_phase == TierRuntime::DecodePhase::SV && 
+                            item->sv_release_cycle) {
+                                continue;
+                        }
+                        // 그 외에는 상태 관리 오류이므로 예외를 던진다.
+                        throw std::logic_error("shared request holds the wrong PIM phase lease");
+                        // 세번쨰 분기 : 채널을 쓰지 않는 phase인데 lease가 남는 경우
+                        // 직전 SV의 drain 시간이 아직 남아있는 경우는 남아있는 lease를 허용한다.
+                    } else if(!uses_channel_buffers && item->holds_channel_lease && 
+                              !(item->leased_phase == TierRuntime::DecodePhase::SV && 
+                                item->sv_release_cycle)) {
+                        throw std::logic_error("shared PIM channels held outside QK/SV");
+                    }
+                }
+                item->step->tick(static_cast<std::uint64_t>(m_clk),
+                    [this,&item](const TierRuntime::PIMCommand& cmd,
+                                TierRuntime::DecodeStepDriver::IssueCallback cb) {
+                        return send_command(*item,cmd,std::move(cb));
+                    });
+                if(item->step->done()) {
+                    item->last_sv_issue_cycle = item->step->last_sv_issue_cycle();
+                    item->token_ready_cycle = m_completion.earliest_cycle(item->last_sv_issue_cycle);
+                    std::cout << "TIER_STEP last_sv_issue_cycle="
+                            << item->last_sv_issue_cycle
+                            << " request_id=" << request.spec.request_id << '\n';
+                    item->step.reset();
+                    if (static_cast<std::uint64_t>(m_clk) >= *item->token_ready_cycle) {
+                        finish_token(*item);
+                    }
+                }
+            }
+            if (static_cast<std::uint64_t>(m_clk) >= m_max_cycles && !is_finished()) {
+                throw std::runtime_error("Tier decode workload exceeded max_cycles");
+            }
+        }
+
+        bool is_finished() override {
+            return std::all_of(m_requests.begin(),m_requests.end(),
+                [](const auto& item) {
+                    return item->request.state == TierRuntime::RequestState::Completed;
+                });
         }
     };
 } // namespace Ramulator

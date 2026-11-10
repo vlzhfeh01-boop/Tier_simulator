@@ -70,7 +70,7 @@ namespace Ramulator::TierRuntime{
         if (slot == m_slot_by_request.end()) {
             throw std::logic_error("request has no shared KV row window");
         }
-        return slot->second * m_rows_per_request;
+        return slot->second * m_rows_per_request; // channel * rows_per_request
     }
 
     std::uint64_t SharedKVRowSpace::rows_per_request()const noexcept {
