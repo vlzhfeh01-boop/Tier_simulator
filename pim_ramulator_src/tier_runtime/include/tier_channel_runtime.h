@@ -44,6 +44,8 @@ namespace Ramulator::TierRuntime {
             // The caller invokes this only after all commands of this token complete.
             void complete_token(RequestContext& request, Clk_t completion_cycle);
             void release_completed(RequestContext& request);
+            // Abort a running request at a token boundary and release its channels.
+            void evict(RequestContext& request);
 
         private:
             [[nodiscard]] std::uint64_t current_length(const RequestContext& request) const;

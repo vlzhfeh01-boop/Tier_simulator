@@ -174,5 +174,26 @@ namespace Ramulator::TierRuntime {
     m_active_request_ids.erase(request.spec.request_id);
 }
     
+    void TierChannelRuntime::evict(RequestContext& request) {
+        check_running(request);
+        if (!request.is_evictable() ||
+           m_active_request_ids.count(request.spec.request_id) != 1) {
+            throw std::logic_error("cannot evict a request with a token in progress");
+        }
+        for (int channel : request.allocated_channels) {
+            if (m_owner_by_channel.at(static_cast<std::size_t>(channel)) !=
+                request.spec.request_id) {
+                throw std::logic_error("eviction lost a channel owner");
+            }
+        }
+        for (int channel : request.allocated_channels) {
+            m_owner_by_channel[static_cast<std::size_t>(channel)] = -1;
+        }
+        request.allocated_channels.clear();
+        request.initial_channel_count = 0;
+        m_active_request_ids.erase(request.spec.request_id);
+        request.state = RequestState::Evicted;
+    }
+    
 
 } // namespace Ramulator::TierRuntime
