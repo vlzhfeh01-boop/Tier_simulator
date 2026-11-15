@@ -20,7 +20,9 @@ namespace Ramulator::TierRuntime{
     class KVCapacityModel {
         public : 
         // layout으로 부터 값을 가져온다.
-            explicit KVCapacityModel(const Ramulator::TierRuntime::RowAlignedKVLayout &layout);
+            explicit KVCapacityModel(
+                const Ramulator::TierRuntime::RowAlignedKVLayout &layout,
+                std::uint64_t test_blocks_per_channel = 0);
 
             [[nodiscard]]
             std::uint64_t tokens_per_block() const noexcept;

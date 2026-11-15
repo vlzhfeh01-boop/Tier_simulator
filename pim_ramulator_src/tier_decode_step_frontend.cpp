@@ -22,6 +22,7 @@
 
 namespace Ramulator {
     namespace {
+
         int request_type(TierRuntime::PIMOpcode opcode) {
             using TierRuntime::PIMOpcode;
             switch (opcode) {
@@ -81,6 +82,7 @@ namespace Ramulator {
         std::uint64_t m_max_cycles = 1000000;
         bool m_share_channels = false;
         std::uint64_t m_shared_row_slot_limit = 0;
+        std::uint64_t m_tier_test_blocks_per_channel = 0;
         std::string m_workload_path;
         std::unique_ptr<TierRuntime::RowAlignedKVLayout> m_layout;
         std::unique_ptr<TierRuntime::KVCapacityModel> m_capacity;
@@ -420,6 +422,8 @@ namespace Ramulator {
             m_share_channels = param<bool>("shared_channels").default_val(false);
             m_shared_row_slot_limit = 
                 param<std::uint64_t>("shared_row_slot_limit").default_val(0);
+            m_tier_test_blocks_per_channel = 
+                param<std::uint64_t>("tier_test_blocks_per_channel").default_val(0);
             m_workload_path = param<std::string>("workload_path").default_val("");
             m_max_cycles = param<std::uint64_t>("max_cycles").default_val(1000000);
             m_completion = TierRuntime::TokenCompletionModel({
@@ -429,7 +433,9 @@ namespace Ramulator {
             if (m_clock_ratio != 1 || m_channel_a < 0 || m_channel_b < 0 ||
                 m_channel_a == m_channel_b || m_channel_a >= 16 ||
                 m_channel_b >= 16 || m_prompt_tokens > 47 || m_max_cycles == 0 ||
-                (m_share_channels && m_workload_path.empty())) {
+                (m_share_channels && m_workload_path.empty()) ||
+                (m_tier_test_blocks_per_channel != 0 &&
+                (m_share_channels || m_workload_path.empty()))) {
                 throw std::invalid_argument(
                     "TierDecodeStep requires clock_ratio=1, two distinct channels "
                     "in [0,16), and prompt_tokens <= 47");

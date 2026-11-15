@@ -11,10 +11,17 @@ namespace TierRuntime{
         }
     }
      
-    KVCapacityModel::KVCapacityModel(const RowAlignedKVLayout& layout)
+    KVCapacityModel::KVCapacityModel(const RowAlignedKVLayout& layout,
+                                     std::uint64_t test_blocks_per_channel)
         : m_tokens_per_block(layout.tokens_per_block()),
-          m_blocks_per_channel(layout.max_blocks_per_channel()) {
-
+          m_blocks_per_channel(test_blocks_per_channel == 0
+                                ? layout.max_blocks_per_channel()
+                                : test_blocks_per_channel) {
+            if (m_blocks_per_channel > layout.max_blocks_per_channel()) {
+                throw std::invalid_argument(
+                    "test block limit exceeds physical channel capacity");
+            }
+            
             if(m_tokens_per_block == 0) {
                 throw std::invalid_argument(
                     "tokens_per_block must be greater than zero."

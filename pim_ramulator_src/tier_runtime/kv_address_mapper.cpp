@@ -6,11 +6,14 @@ namespace Ramulator::TierRuntime {
 
     KVAddressMapper::KVAddressMapper(const RowAlignedKVLayout& layout, const OrderedBlockMapper& block_mapper)
         : m_layout(layout),m_block_mapper(block_mapper) {
-            if(m_layout.max_blocks_per_channel() != m_block_mapper.blocks_per_channel()) {
+            // A logical allocation limit may be smaller than the physical row
+            // capacity; every channel-local block must still fit the layout.
+            if(m_block_mapper.blocks_per_channel() == 0 ||
+               m_block_mapper.blocks_per_channel() > m_layout.max_blocks_per_channel()) {
                 throw std::invalid_argument(
-                    "layout and block mapper have different blocks_per_channel"
+                    "block mapper exceeds physical channel capacity"
                 );
-            }
+               }
         }
 
     PhysicalKVAddress KVAddressMapper::locate_element(
