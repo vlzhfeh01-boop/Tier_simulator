@@ -61,6 +61,9 @@ namespace Ramulator {
 
         struct WorkItem {
             TierRuntime::RequestContext request;
+            // One token placement is shared by all of its layers.
+            std::optional<TierRuntime::DecodeTokenPlan> token_plan;
+            std::uint64_t next_layer = 0;
             std::unique_ptr<TierRuntime::DecodeStepDriver> step;
             std::optional<std::uint64_t> token_ready_cycle;
             std::uint64_t last_sv_issue_cycle = 0;
@@ -77,6 +80,9 @@ namespace Ramulator {
         int m_channel_a = 2;
         int m_channel_b = 5;
         std::uint64_t m_prompt_tokens = 33;
+        std::uint64_t m_layers_on_hbm = 1;
+        std::uint64_t m_query_head_count = 1;
+        std::uint64_t m_kv_head_count = 1;
         std::uint64_t m_softmax_delay = 0;
         std::uint64_t m_sv_drain_cycles = 0;
         std::uint64_t m_max_cycles = 1000000;
@@ -289,7 +295,7 @@ namespace Ramulator {
                 const auto& item = *m_requests[i];
                 if (item.request.state != TierRuntime::RequestState::Running) continue;
                 if (!growth_blocked[i]) return false;
-                if (item.step || item.token_ready_cycle || item.sv_release_cycle ||
+                if (item.step || item.token_plan || item.token_ready_cycle || item.sv_release_cycle ||
                     item.holds_channel_lease || 
                     m_sfm_owner == item.request.spec.request_id ||
                     !item.request.is_evictable()) {
@@ -328,7 +334,8 @@ namespace Ramulator {
 
         bool send_command(WorkItem& item, const TierRuntime::PIMCommand& cmd,
                           TierRuntime::DecodeStepDriver::IssueCallback on_issue) {
-            const auto mapped = m_share_channels ? m_shared_space->translate(item.request.spec.request_id, cmd) : cmd;
+            const auto mapped = m_share_channels 
+            ? m_shared_space->translate(item.request.spec.request_id, cmd) : cmd;
             if (mapped.address >
                 static_cast<std::uint64_t>(std::numeric_limits<Addr_t>::max())) {
                 throw std::overflow_error("PIM address exceeds signed Addr_t");
@@ -392,6 +399,9 @@ namespace Ramulator {
                     << " last_sv_issue_cycle=" << item.last_sv_issue_cycle
                     << " completion_cycle=" << m_clk << '\n';
             item.token_ready_cycle.reset();
+            item.token_plan.reset();
+            item.next_layer = 0;
+            item.qk_channels.clear();
             if (m_share_channels) {
                 for (std::size_t index = 0; index < m_requests.size(); ++index) {
                     if (m_requests[index].get() == &item) {
@@ -417,6 +427,9 @@ namespace Ramulator {
             m_channel_a = param<int>("channel_a").default_val(2);
             m_channel_b = param<int>("channel_b").default_val(5);
             m_prompt_tokens = param<std::uint64_t>("prompt_tokens").default_val(33);
+            m_layers_on_hbm = param<std::uint64_t>("layers_on_hbm").default_val(1);
+            m_query_head_count = param<std::uint64_t>("query_head_count").default_val(1);
+            m_kv_head_count = param<std::uint64_t>("kv_head_count").default_val(1);
             m_softmax_delay = param<std::uint64_t>("softmax_delay_cycles").default_val(0);
             m_sv_drain_cycles = param<std::uint64_t>("sv_drain_cycles").default_val(0);
             m_share_channels = param<bool>("shared_channels").default_val(false);
@@ -433,19 +446,21 @@ namespace Ramulator {
             if (m_clock_ratio != 1 || m_channel_a < 0 || m_channel_b < 0 ||
                 m_channel_a == m_channel_b || m_channel_a >= 16 ||
                 m_channel_b >= 16 || m_prompt_tokens > 47 || m_max_cycles == 0 ||
+                m_layers_on_hbm ==0 || m_query_head_count == 0 ||
+                m_kv_head_count == 0 || m_query_head_count % m_kv_head_count != 0 ||
                 (m_share_channels && m_workload_path.empty()) ||
                 (m_tier_test_blocks_per_channel != 0 &&
                 (m_share_channels || m_workload_path.empty()))) {
                 throw std::invalid_argument(
                     "TierDecodeStep requires clock_ratio=1, two distinct channels "
-                    "in [0,16), and prompt_tokens <= 47");
+                    "in [0,16), and prompt_tokens <= 47, a positive GQA shape");
             }
 
             // The sample uses three 16-token blocks across two initial channels.
-            const TierRuntime::KVBlockShape shape({16, 1, 1, 128, 2});
+            const TierRuntime::KVBlockShape shape({16, m_layers_on_hbm, m_kv_head_count, 128, 2});
             m_layout = std::make_unique<TierRuntime::RowAlignedKVLayout>(
                 shape, TierRuntime::PIMGeometryConfig{2, 2, 4, 4, 16384, 32, 32});
-            m_capacity = std::make_unique<TierRuntime::KVCapacityModel>(*m_layout);
+            m_capacity = std::make_unique<TierRuntime::KVCapacityModel>(*m_layout,m_tier_test_blocks_per_channel);
             m_mapper = std::make_unique<TierRuntime::OrderedBlockMapper>(*m_capacity);
             m_generator = std::make_unique<TierRuntime::PIMCommandGenerator>(
                 *m_layout, *m_mapper, 16);
@@ -490,7 +505,7 @@ namespace Ramulator {
                 const auto index = (start + offset) % m_requests.size();
                 auto& item = *m_requests[index];
                 if (item.request.state != TierRuntime::RequestState::Running ||
-                    item.step || item.token_ready_cycle) continue;
+                    item.token_plan || item.step || item.token_ready_cycle) continue;
                 if (m_share_channels) {
                     growth_checked[index] = true;
                     growth_blocked[index] = !ensure_shared_growth(item);
@@ -540,39 +555,44 @@ namespace Ramulator {
                     continue;
                 }
                 if(!item->step) {
-                    if (growth_blocked[index] ||
-                        (m_share_channels && !growth_checked[index] &&
-                        !ensure_shared_growth(*item))) continue;
-                    auto plan = growth_plans[index]
-                        ? std::move(growth_plans[index])
-                        : m_share_channels
-                            ? item->shared_runtime->begin_token(request)
-                            : m_scheduler->try_begin_token(request);
-                    if(!plan) {
-                        if(m_share_channels) {
-                            throw std::logic_error("shared token exceeds channel mapping capacity");
+                    if(!item->token_plan){
+                        if (growth_blocked[index] ||
+                            (m_share_channels && !growth_checked[index] &&
+                            !ensure_shared_growth(*item))) continue;
+                        auto plan = growth_plans[index]
+                            ? std::move(growth_plans[index])
+                            : m_share_channels
+                                ? item->shared_runtime->begin_token(request)
+                                : m_scheduler->try_begin_token(request);
+                        if(!plan) {
+                            if(m_share_channels) {
+                                throw std::logic_error("shared token exceeds channel mapping capacity");
+                            }
+                            continue; // Wait for an exclusive growth channel.
                         }
-                        continue; // Wait for an exclusive growth channel.
+                        item->token_plan = std::move(*plan);
+                        item->next_layer = 0;
                     }
-                    const auto token_index = plan->token_index;
+                    const auto token_index = item->token_plan->token_index;
+                    const auto layer_index = item->next_layer;
                     if(m_share_channels) {
                         // The existing ST_FENCE is channel-wide. Keep KV append
                         // and QK in one lease so another request cannot insert a
                         // store fence into a partially submitted QK stream.
                         item->qk_channels = m_generator->generate_qk(
                             TierRuntime::QKCommandInput{
-                                0,0,plan->valid_token_count,
-                                plan->allocated_channel_ids,
-                                plan->initial_channel_count}).active_channel_ids;
+                                layer_index,0,item->token_plan->valid_token_count,
+                                item->token_plan->allocated_channel_ids,
+                                item->token_plan->initial_channel_count}).active_channel_ids;
                     }
                     auto layer = TierRuntime::build_runtime_decode_layer_plan(
-                        request,*plan,0,1,1,*m_generator,*m_encoder);
+                        request,*item->token_plan,layer_index,m_query_head_count,m_kv_head_count,*m_generator,*m_encoder);
                     const auto id = request.spec.request_id;
                     auto* const work = item.get();
                     item->step = std::make_unique<TierRuntime::DecodeStepDriver>(
                         std::move(layer), *m_generator, *m_encoder, m_softmax_delay,
                         // on phase complete
-                        [this,work,id,token_index](TierRuntime::DecodePhase phase,
+                        [this,work,id,token_index,layer_index](TierRuntime::DecodePhase phase,
                                             std::uint64_t head, std::uint64_t cycle) {
                             if(m_share_channels && 
                                 (phase == TierRuntime::DecodePhase::QK || 
@@ -612,7 +632,8 @@ namespace Ramulator {
                                   << " event=" << phase_name(phase)
                                   << " cycle=" << cycle
                                   << " request_id=" << id
-                                  << " token_index=" << token_index << '\n';
+                                  << " token_index=" << token_index
+                                  << " layer=" << layer_index << '\n';
                         });
                 }
                 if(m_share_channels) {
@@ -664,15 +685,24 @@ namespace Ramulator {
                                 TierRuntime::DecodeStepDriver::IssueCallback cb) {
                         return send_command(*item,cmd,std::move(cb));
                 });
-                if(item->step->done()) {
+                if (item->step->done()) {
                     item->last_sv_issue_cycle = item->step->last_sv_issue_cycle();
-                    item->token_ready_cycle = m_completion.earliest_cycle(item->last_sv_issue_cycle);
-                    std::cout << "TIER_STEP last_sv_issue_cycle="
+                    std::cout << "TIER_LAYER_DONE request_id=" << request.spec.request_id
+                              << " token_index=" << item->token_plan->token_index
+                              << " layer=" << item->next_layer
+                              << " cycle=" << m_clk
+                              << " last_sv_issue_cycle=" << item->last_sv_issue_cycle << '\n';
+                    item->step.reset();
+                    ++item->next_layer;
+                    if (item->next_layer == m_layers_on_hbm) {
+                        item->token_ready_cycle = 
+                            m_completion.earliest_cycle(item->last_sv_issue_cycle);
+                        std::cout << "TIER_STEP last_sv_issue_cycle="
                             << item->last_sv_issue_cycle
                             << " request_id=" << request.spec.request_id << '\n';
-                    item->step.reset();
-                    if (static_cast<std::uint64_t>(m_clk) >= *item->token_ready_cycle) {
+                        if (static_cast<std::uint64_t>(m_clk) >= *item->token_ready_cycle) {
                         finish_token(*item);
+                        }
                     }
                 }
             }
