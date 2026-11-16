@@ -1,0 +1,6 @@
+# Qwen3-8B KV shape; max_output_tokens is an experiment cap, not a model attribute.
+num_layers: 36
+num_kv_heads: 8
+head_dim: 128
+element_bytes: 2
+max_output_tokens: 8192
