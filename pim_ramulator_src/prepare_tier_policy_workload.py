@@ -14,15 +14,17 @@ from pathlib import Path
 import yaml
 
 ROOT = Path(__file__).resolve().parents[1]
-sys.path.insert(0,str(ROOT))
-from tier_workload import generator
-from tier_workload.spec import load_experiment
+sys.path.insert(0, str(ROOT))
+from tier_workload import generator  # noqa: E402
+from tier_workload.spec import load_experiment  # noqa: E402
+
 
 class YAML12Loader(yaml.SafeLoader):
     """Keep Ramulator implementation name 'No' as a string, not a YAML 1.1 bool."""
 
+
 YAML12Loader.yaml_implicit_resolvers = {
-    char: [(tag,pattern) for tag,pattern in resolvers
+    char: [(tag, pattern) for tag, pattern in resolvers
            if tag != "tag:yaml.org,2002:bool"]
     for char, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
 }
@@ -30,27 +32,40 @@ YAML12Loader.add_implicit_resolver("tag:yaml.org,2002:bool",
                                    re.compile(r"^(?:true|false)$", re.I),
                                    list("tTfF"))
 
-def load_template(path:Path) -> dict:
-     return yaml.load(path.read_text(), Loader=YAML12Loader)
 
-def cycle_at_or_after(ns:int, tck_ps: int) -> int:
+def load_template(path: Path) -> dict:
+    return yaml.load(path.read_text(), Loader=YAML12Loader)
+
+
+def cycle_at_or_after(ns: int, tck_ps: int) -> int:
     if ns < 0 or tck_ps <= 0:
         raise ValueError("arrival time must be nonnegative and tCK positive")
-    return (ns * 1000 + tck_ps -1) // tck_ps
+    return (ns * 1000 + tck_ps - 1) // tck_ps
+
+
+def validate_context(requests, max_position_embeddings: int = 40960) -> None:
+    """A replay trace's actual length must fit the model; prediction is a hint."""
+    for request in requests:
+        if request.prompt_tokens + request.actual_output_tokens > max_position_embeddings:
+            raise ValueError(
+                f"request_id={request.request_id} exceeds Qwen3 context "
+                f"of {max_position_embeddings} tokens")
+
 
 def export_requests(requests, csv_path: Path, tck_ps: int) -> None:
     if not requests:
         raise ValueError("workload has no requests")
     csv_path.parent.mkdir(parents=True, exist_ok=True)
-    with csv_path.open("w",newline="") as stream:
+    with csv_path.open("w", newline="") as stream:
         writer = csv.writer(stream, lineterminator="\n")
         writer.writerow(["# request_id", "arrival_cycle", "prompt_tokens",
-                         "predicted_output_tokens","actual_output_tokens"])
+                         "predicted_output_tokens", "actual_output_tokens"])
         for request in requests:
             writer.writerow([request.request_id,
                              cycle_at_or_after(request.arrival_time_ns, tck_ps),
                              request.prompt_tokens, request.predicted_output_tokens,
                              request.actual_output_tokens])
+
 
 def prepare_configs(template: Path, output: Path, stem: str, max_cycles: int) -> None:
     config = load_template(template)
@@ -60,6 +75,9 @@ def prepare_configs(template: Path, output: Path, stem: str, max_cycles: int) ->
             memory["DRAM"]["impl"] != "HBM3-PIM" or
             memory["DRAM"]["org"].get("channel") != 16):
         raise ValueError("template must target TierDecodeStep with 16-channel HBM3-PIM")
+    if (frontend.get("tier_test_blocks_per_channel", 0) or
+            frontend.get("shared_row_slot_limit", 0)):
+        raise ValueError("paired policy template must not use artificial KV capacity limits")
     if max_cycles <= 0:
         raise ValueError("max_cycles must be positive")
     for shared, policy in ((False, "tier"), (True, "shared")):
@@ -88,22 +106,22 @@ def main() -> None:
     parser.add_argument("--out-dir", type=Path, required=True)
     parser.add_argument("--name", default="tier_policy_workload")
     parser.add_argument("--tck-ps", type=int, required=True,
-                            help="DRAM nCK period; HBM3_5.2Gbps preset here uses 1300 ps")
-    parser.add_argument("--max-cycles",type=int, default=100_000_000)
+                        help="effective DRAM nCK period; HBM3_5.2Gbps uses 769 ps")
+    parser.add_argument("--max-cycles", type=int, default=100_000_000)
     parser.add_argument("--num-requests", type=int)
     parser.add_argument("--seed", type=int)
     parser.add_argument("--rate-rps", type=float,
-                            help="override Poisson arrival rate in requests/second")
+                        help="override Poisson arrival rate in requests/second")
     parser.add_argument("--batch", action="store_true", help="all arrivals at cycle 0")
     args = parser.parse_args()
-    if args.name in ("",".","..") or "/" in args.name or "\\" in args.name:
+    if args.name in ("", ".", "..") or "/" in args.name or "\\" in args.name:
         parser.error("--name must be a simple filename stem")
     if args.tck_ps <= 0 or args.max_cycles <= 0:
-            parser.error("--tck-ps and --max-cycles must be positive")
+        parser.error("--tck-ps and --max-cycles must be positive")
     if args.batch and args.rate_rps is not None:
         parser.error("choose either --batch or --rate-rps")
     if args.requests_json and (args.batch or any(v is not None for v in
-                                    (args.num_requests, args.seed, args.rate_rps))):
+                                  (args.num_requests, args.seed, args.rate_rps))):
         parser.error("generator overrides cannot be used with --requests-json")
     try:
         exp = load_experiment(args.hw, args.model, args.workload)
@@ -117,8 +135,8 @@ def main() -> None:
                 config["Frontend"].get("kv_head_count") != exp.runtime.num_kv_heads or
                 config["MemorySystem"]["DRAM"]["timing"].get("preset") != "HBM3_5.2Gbps"):
             raise ValueError("template must use Qwen3-8B and HBM3_5.2Gbps")
-        if(args.tck_ps != 1300):
-             raise ValueError("HBM3_5.2Gbps template specifies tCK_ps=1300")
+        if args.tck_ps != 769:
+            raise ValueError("HBM3_5.2Gbps initializes effective tCK_ps=769")
         params = exp.workload
         updates = {}
         for name in ("num_requests", "seed"):
@@ -132,28 +150,26 @@ def main() -> None:
         params = replace(params, **updates)
         if params.num_requests <= 0 or (params.rate_rps is not None and
                                         (not math.isfinite(params.rate_rps) or
-                                            params.rate_rps <= 0)):
+                                         params.rate_rps <= 0)):
             raise ValueError("request count and Poisson rate must be positive")
         requests = (generator.load_workload(args.requests_json) if args.requests_json
                     else generator.generate(params, exp.model.max_output_tokens))
         generator.validate(requests, exp.runtime)
-        if any(r.prompt_tokens + r.actual_output_tokens > 40960 or
-                r.prompt_tokens + r.predicted_output_tokens > 40960
-                for r in requests):
-            raise ValueError("request exceeds physical KV capacity or Qwen3 context")
+        # The CSV includes actual for trace termination, but no scheduler may
+        # reject a request based on the predicted length crossing this limit.
+        validate_context(requests)
         if max(cycle_at_or_after(r.arrival_time_ns, args.tck_ps)
-                for r in requests) >= args.max_cycles:
+               for r in requests) >= args.max_cycles:
             raise ValueError("latest arrival is at or after max_cycles")
         output = args.out_dir.resolve()
         output.mkdir(parents=True, exist_ok=True)
         export_requests(requests, output / f"{args.name}.csv", args.tck_ps)
         prepare_configs(args.template, output, args.name, args.max_cycles)
     except (ValueError, KeyError, OSError) as exc:
-            parser.error(str(exc))
+        parser.error(str(exc))
     print(f"Prepared {len(requests)} requests in {output}")
     print("Run both YAML files from that directory, then compare the two outputs.")
 
+
 if __name__ == "__main__":
     main()
-
-            

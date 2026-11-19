@@ -1,5 +1,6 @@
 #include "tier_channel_runtime.h"
 
+#include <algorithm>
 #include <limits>
 #include <stdexcept>
 #include <unordered_set>
@@ -37,8 +38,13 @@ namespace Ramulator::TierRuntime {
 
     std::uint64_t TierChannelRuntime::predicted_initial_channel_count(const RequestSpec& spec) const {
         const auto predicted_total = m_capacity.total_tokens(spec.prompt_tokens, spec.predicted_output_tokens);
-        return std::max<std::uint64_t>(
-            1, m_capacity.required_channels_for_tokens(predicted_total));
+        // A prediction is an allocation hint. If it exceeds this stack's
+        // capacity, use at most the physical channels and continue while the
+        // actual KV length remains representable.
+        return std::min<std::uint64_t>(
+            m_owner_by_channel.size(),
+            std::max<std::uint64_t>(
+                1, m_capacity.required_channels_for_tokens(predicted_total)));
     }
 
     std::vector<int> TierChannelRuntime::free_channel_ids() const {

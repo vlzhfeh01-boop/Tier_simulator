@@ -106,6 +106,25 @@ namespace Ramulator {
         std::optional<std::uint64_t> m_last_sfm_submit_cycle;
         std::size_t m_next_request_index = 0;
         bool m_summary_reported = false;
+        std::uint64_t token_capacity_per_request() const {
+        if (m_share_channels) {
+            const auto slots = m_shared_row_slot_limit == 0
+                ? m_layout->rows_per_slice_capacity() : m_shared_row_slot_limit;
+            return slots * m_shared_space->tokens_per_row_stripe();
+        }
+        return m_capacity->block_capacity(16) * m_capacity->tokens_per_block();
+    }
+
+    void check_next_token_capacity(const TierRuntime::RequestContext& request) const {
+        const auto next_length = static_cast<std::uint64_t>(
+            request.spec.prompt_tokens) + request.generated_tokens + 1;
+        if (next_length > token_capacity_per_request()) {
+            throw std::runtime_error(
+                "request_id=" + std::to_string(request.spec.request_id) +
+                " exceeds physical " + (m_share_channels ? "Shared" : "Tier") +
+                " KV capacity at token_count=" + std::to_string(next_length));
+        }
+    }
 
         static std::uint64_t parse_integer(const std::string& field) {
             std::istringstream input(field);
@@ -169,21 +188,10 @@ namespace Ramulator {
                 spec.prompt_tokens = static_cast<std::uint32_t>(prompt);
                 spec.predicted_output_tokens = static_cast<std::uint32_t>(predicted);
                 spec.actual_output_tokens = static_cast<std::uint32_t>(actual);
-                spec.max_output_tokens = spec.actual_output_tokens;
-                if (m_runtime->predicted_initial_channel_count(spec) > 16 || 
-                    m_capacity->required_channels_for_tokens(
-                        m_capacity->total_tokens(prompt,actual)) > 16) {
-                    throw std::invalid_argument("request exceeds 16 physical Tier channels");
-                }
-                if (m_share_channels && m_shared_row_slot_limit != 0) {
-                    const auto total = m_capacity->total_tokens(prompt, actual);
-                    const auto per_slot = m_shared_space->tokens_per_row_stripe();
-                    const auto required = total / per_slot +
-                                          static_cast<std::uint64_t>(total % per_slot != 0);
-                    if (required > m_shared_row_slot_limit) { // shared row slot limit을 초과하는 경우 시뮬레이션 시작 전에 확인
-                        throw std::invalid_argument(
-                            "request can never fit in shared row slot limit");
-                    }
+                spec.max_output_tokens = 0;
+                if (prompt + 1 > token_capacity_per_request()) {
+                    throw std::invalid_argument(
+                        "prompt plus first output token exceeds physical KV capacity");
                 }
                 m_requests.push_back(std::move(item));
             }
@@ -205,13 +213,14 @@ namespace Ramulator {
                 if (request.spec.arrival_cycle > m_clk) break;
                 // shared tier의 경우
                 if (m_share_channels) {
-                    if(!m_shared_space->reserve(request.spec.request_id, request.spec.prompt_tokens)) break;
-                    item->shared_runtime = std::make_unique<TierRuntime::TierChannelRuntime> (
+                    if (!m_shared_space->reserve(request.spec.request_id,
+                                                request.spec.prompt_tokens)) break;
+                    item->shared_runtime = std::make_unique<TierRuntime::TierChannelRuntime>(
                         *m_capacity, *m_mapper, 16);
                     std::vector<int> all_channels(16);
                     // 0부터 1씩 증가하면서 벡터를 채운다.
-                    std::iota(all_channels.begin(), all_channels.end(),0);
-                    item->shared_runtime->admit(request,std::move(all_channels),m_clk);
+                    std::iota(all_channels.begin(), all_channels.end(), 0);
+                    item->shared_runtime->admit(request, std::move(all_channels), m_clk);
                     std::cout << "TIER_KV_REGION request_id=" << request.spec.request_id
                               << " row_offset="
                             << m_shared_space->row_offset(request.spec.request_id)
@@ -506,6 +515,7 @@ namespace Ramulator {
                 auto& item = *m_requests[index];
                 if (item.request.state != TierRuntime::RequestState::Running ||
                     item.token_plan || item.step || item.token_ready_cycle) continue;
+                check_next_token_capacity(item.request);
                 if (m_share_channels) {
                     growth_checked[index] = true;
                     growth_blocked[index] = !ensure_shared_growth(item);
@@ -538,24 +548,24 @@ namespace Ramulator {
                 const auto index = (start+offset) % m_requests.size();
                 auto& item = m_requests[index];
                 auto& request = item->request;
-                if(request.state != TierRuntime::RequestState::Running) continue;
-                if(item->sv_release_cycle && 
+                if (request.state != TierRuntime::RequestState::Running) continue;
+                if (item->sv_release_cycle && 
                    static_cast<std::uint64_t>(m_clk) >= *item->sv_release_cycle) {
-                    if(item->leased_phase != TierRuntime::DecodePhase::SV){
+                    if (item->leased_phase != TierRuntime::DecodePhase::SV) {
                         throw std::logic_error("SV drain lost its channel lease");
                     }
                     release_shared_lease(*item, item->last_sv_issue_cycle);
                     item->sv_release_cycle.reset();
                 }
                 // 해당 토큰의 명령 발행 + 후속 모델 지연까지 반영
-                if(item->token_ready_cycle) {
-                    if(static_cast<std::uint64_t>(m_clk) >= *item->token_ready_cycle){
+                if (item->token_ready_cycle) {
+                    if (static_cast<std::uint64_t>(m_clk) >= *item->token_ready_cycle){
                         finish_token(*item);
                     }
                     continue;
                 }
-                if(!item->step) {
-                    if(!item->token_plan){
+                if (!item->step) {
+                    if (!item->token_plan) {
                         if (growth_blocked[index] ||
                             (m_share_channels && !growth_checked[index] &&
                             !ensure_shared_growth(*item))) continue;
@@ -571,6 +581,14 @@ namespace Ramulator {
                             continue; // Wait for an exclusive growth channel.
                         }
                         item->token_plan = std::move(*plan);
+                        if (!m_share_channels && item->token_plan->grew) {
+                        std::cout << "TIER_CHANNEL_GROW request_id="
+                                  << request.spec.request_id
+                                  << " channel=" << item->token_plan->store_channel_id
+                                  << " channels=" << item->token_plan->allocated_channel_ids.size()
+                                  << " token_index=" << item->token_plan->token_index
+                                  << " cycle=" << m_clk << '\n';
+                        }
                         item->next_layer = 0;
                     }
                     const auto token_index = item->token_plan->token_index;

@@ -1,0 +1,10 @@
+# Longer output requests; start with a tiny request count before a full sweep.
+num_requests: 4
+seed: 7
+rate_rps: 1000
+prompt_mean: 6144
+prompt_sigma: 0.35
+output_mean: 64
+output_sigma: 0.75
+pred_bias: -0.4
+pred_sigma: 0.5

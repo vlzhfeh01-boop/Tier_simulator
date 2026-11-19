@@ -41,7 +41,11 @@ def read_run(path: Path, requests: dict[int, dict]) -> dict:
     tokens: dict[int, list[int]] = {}
     completed: dict[int, dict] = {}
     evicted: dict[int, dict] = {}
-    counts = {"kv_growth": 0, "kv_waits": 0, "channel_waits": 0}
+    counts = {"kv_growth": 0, "kv_waits": 0, "kv_wait_cycles": 0,
+              "kv_wait_censored_cycles": 0, "channel_growth": 0,
+              "channel_waits": 0, "channel_wait_cycles": 0,
+              "channel_wait_censored_cycles": 0}
+    open_waits: dict[str, dict[int, int]] = {"kv": {}, "channel": {}}
     summary = None
     with path.open(errors="replace") as stream:
         for line in stream:
@@ -54,10 +58,35 @@ def read_run(path: Path, requests: dict[int, dict]) -> dict:
                     raise ValueError(f"{path}: duplicate summary")
                 summary = data
                 continue
+            wait_type = {
+                "TIER_KV_WAIT": ("kv", "start"),
+                "TIER_KV_RESUME": ("kv", "finish"),
+                "TIER_CHANNEL_WAIT": ("channel", "start"),
+                "TIER_CHANNEL_RESUME": ("channel", "finish"),
+            }.get(event)
+            if wait_type is not None:
+                kind, action = wait_type
+                rid = data.get("request_id")
+                if rid not in requests:
+                    raise ValueError(f"{path}: unexpected request_id {rid}")
+                pending = open_waits[kind]
+                if action == "start":
+                    if rid in pending:
+                        raise ValueError(f"{path}: duplicate {kind} wait for {rid}")
+                    pending[rid] = data["cycle"]
+                else:
+                    if rid not in pending:
+                        raise ValueError(f"{path}: {kind} resume without wait for {rid}")
+                    elapsed = data["cycle"] - pending.pop(rid)
+                    if elapsed < 0 or data["wait_cycles"] != elapsed:
+                        raise ValueError(f"{path}: invalid {kind} wait duration for {rid}")
+                    counts[f"{kind}_wait_cycles"] += elapsed
             if event == "TIER_KV_GROW":
                 counts["kv_growth"] += 1
             elif event == "TIER_KV_WAIT":
                 counts["kv_waits"] += 1
+            elif event == "TIER_CHANNEL_GROW":
+                counts["channel_growth"] += 1
             elif event == "TIER_CHANNEL_WAIT":
                 counts["channel_waits"] += 1
             if event not in ("TIER_ADMIT", "TIER_TOKEN", "TIER_REQUEST", "TIER_EVICT"):
@@ -83,9 +112,18 @@ def read_run(path: Path, requests: dict[int, dict]) -> dict:
             elif event == "TIER_EVICT":
                 if rid in completed or rid in evicted:
                     raise ValueError(f"{path}: repeated terminal event for {rid}")
+                for kind, pending in open_waits.items():
+                    if rid in pending:
+                        elapsed = data["cycle"] - pending.pop(rid)
+                        if elapsed < 0:
+                            raise ValueError(f"{path}: eviction precedes {kind} wait")
+                        counts[f"{kind}_wait_cycles"] += elapsed
+                        counts[f"{kind}_wait_censored_cycles"] += elapsed
                 evicted[rid] = data
     if not summary:
         raise ValueError(f"{path}: missing TIER_SUMMARY (aborted or incomplete run)")
+    if any(pending for pending in open_waits.values()):
+        raise ValueError(f"{path}: unterminated growth wait")
     if (summary["total_requests"] != len(requests) or
             summary["completed"] != len(completed) or
             summary["evicted"] != len(evicted) or
@@ -196,6 +234,7 @@ def main() -> None:
         print(f"  admission_wait={data['admission_wait_cycles']}; "
               f"inter_token={data['inter_token_cycles']}")
         print(f"  kv_growth={data['kv_growth']}, kv_waits={data['kv_waits']}, "
+              f"channel_growth={data['channel_growth']}, "
               f"channel_waits={data['channel_waits']}")
         if "goodput_requests_per_second" in data:
             print(f"  SLO goodput={data['goodput_requests_per_second']:.3f} req/s; "

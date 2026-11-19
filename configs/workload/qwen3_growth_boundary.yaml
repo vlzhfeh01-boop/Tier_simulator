@@ -1,0 +1,10 @@
+# Controlled 7168-token Tier boundary; stress growth and admission.
+num_requests: 16
+seed: 7
+rate_rps: 1000000
+prompt_mean: 7162
+prompt_sigma: 0.001
+output_mean: 16
+output_sigma: 0.4
+pred_bias: -1.0
+pred_sigma: 0.4

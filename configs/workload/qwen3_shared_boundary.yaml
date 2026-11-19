@@ -1,0 +1,10 @@
+# Controlled 4096-token Shared row stripe boundary; no test capacity limits.
+num_requests: 16
+seed: 7
+rate_rps: 100000
+prompt_mean: 4093
+prompt_sigma: 0.0005
+output_mean: 16
+output_sigma: 0.4
+pred_bias: -0.7
+pred_sigma: 0.4

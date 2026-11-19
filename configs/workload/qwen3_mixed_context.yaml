@@ -1,0 +1,10 @@
+# Synthetic diverse context lengths; use for policy breadth, not as a real trace.
+num_requests: 12
+seed: 7
+rate_rps: 1000000
+prompt_mean: 4096
+prompt_sigma: 0.55
+output_mean: 8
+output_sigma: 0.75
+pred_bias: -0.3
+pred_sigma: 0.4
